@@ -1,0 +1,11 @@
+# Edge 浏览器用户数据（含 Cookie，不应提交）
+edge_profile/
+
+# 运行截图
+screenshots/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/

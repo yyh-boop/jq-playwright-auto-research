@@ -92,7 +92,8 @@ def run(keyword: str = SEARCH_KEYWORD, engine: str = SEARCH_ENGINE) -> None:
         page.screenshot(path=str(screenshot_path))
         print(f"截图已保存 → {screenshot_path}")
 
-        page.wait_for_timeout(2000)
+        print("自动化已完成，浏览器保持打开。按 Enter 键关闭浏览器并结束程序...")
+        input()
         context.close()
         print("流程结束！")
 

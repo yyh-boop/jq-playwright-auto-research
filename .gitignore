@@ -4,6 +4,9 @@ edge_profile/
 # 运行截图
 screenshots/
 
+# 账号密码（切勿提交）
+.env
+
 # Python
 __pycache__/
 *.py[cod]

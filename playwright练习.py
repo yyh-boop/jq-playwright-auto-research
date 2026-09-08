@@ -2,16 +2,26 @@
 """
 Playwright + Microsoft Edge 聚宽平台自动化练习（feature/backtest：策略回测）
 
-流程：登录 → 策略回测 → 打开「自动化测试用」→ 关闭提示弹窗 → 编译运行
+流程：登录 → 策略回测 → 打开「自动化测试用」→ 关闭提示弹窗 → 设置回测参数 → 编译运行
+
+回测参数在 backtest_config.py 中修改。
 """
 
 import os
 import random
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, sync_playwright
+
+from backtest_config import (
+    BACKTEST_END_DATE,
+    BACKTEST_FREQUENCY,
+    BACKTEST_INITIAL_CAPITAL,
+    BACKTEST_START_DATE,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 SCREENSHOTS_DIR = BASE_DIR / "screenshots"
@@ -26,6 +36,57 @@ DEFAULT_STRATEGY_NAME = "自动化测试用"
 MANUAL_LOGIN_TIMEOUT = 300
 STEP_DELAY_MIN = 3
 STEP_DELAY_MAX = 8
+
+FREQUENCY_LABEL_TO_VALUE = {
+    "每天": "day",
+    "分钟": "minute",
+    "tick": "tick",
+}
+FREQUENCY_VALUE_TO_LABEL = {v: k for k, v in FREQUENCY_LABEL_TO_VALUE.items()}
+
+SET_BACKTEST_DATES_JS = """
+({ start, end }) => {
+  const startInput = document.querySelector('#startTime');
+  const endInput = document.querySelector('#endTime');
+  if (!startInput || !endInput) return null;
+  startInput.value = start + ' 00:00:00';
+  endInput.value = end + ' 23:59:59';
+  startInput.dispatchEvent(new Event('change', { bubbles: true }));
+  endInput.dispatchEvent(new Event('change', { bubbles: true }));
+  return { start: startInput.value, end: endInput.value };
+}
+"""
+
+
+@dataclass(frozen=True)
+class BacktestParams:
+    start_date: str
+    end_date: str
+    initial_capital: int
+    frequency: str  # 每天 | 分钟 | tick
+
+    def __post_init__(self) -> None:
+        if self.frequency not in FREQUENCY_LABEL_TO_VALUE:
+            allowed = "、".join(FREQUENCY_LABEL_TO_VALUE)
+            raise ValueError(f"回测频度必须是 {allowed}，当前为：{self.frequency}")
+
+
+def get_backtest_params() -> BacktestParams:
+    """读取回测参数：优先 .env，否则使用 backtest_config.py。"""
+    load_env()
+    frequency = os.getenv("JOINQUANT_BACKTEST_FREQUENCY", BACKTEST_FREQUENCY).strip()
+    start_date = os.getenv("JOINQUANT_BACKTEST_START_DATE", BACKTEST_START_DATE).strip()
+    end_date = os.getenv("JOINQUANT_BACKTEST_END_DATE", BACKTEST_END_DATE).strip()
+    capital_raw = os.getenv(
+        "JOINQUANT_BACKTEST_INITIAL_CAPITAL",
+        str(BACKTEST_INITIAL_CAPITAL),
+    ).strip()
+    return BacktestParams(
+        start_date=start_date,
+        end_date=end_date,
+        initial_capital=int(capital_raw.replace(",", "").replace("_", "")),
+        frequency=frequency,
+    )
 
 
 def load_env() -> None:
@@ -288,9 +349,61 @@ def dismiss_edit_prompt_if_present(page: Page) -> None:
     step_delay(page, "弹窗处理结束")
 
 
+def configure_backtest_params(page: Page, params: BacktestParams) -> bool:
+    """在编辑器顶栏设置回测区间、初始资金、回测频度。"""
+    print("\n【步骤 6】设置回测参数...")
+    print(f"  区间：{params.start_date} 至 {params.end_date}")
+    print(f"  初始资金：{params.initial_capital:,} 元")
+    print(f"  回测频度：{params.frequency}")
+
+    page.wait_for_selector("#startTime", timeout=15000)
+    page.wait_for_selector("#endTime", timeout=15000)
+
+    dates = page.evaluate(
+        SET_BACKTEST_DATES_JS,
+        {"start": params.start_date, "end": params.end_date},
+    )
+    if not dates:
+        print("未能设置回测日期")
+        return False
+    step_delay(page, "设置回测区间")
+
+    capital_input = page.locator("input[name='backtest[baseCapital]']")
+    capital_input.wait_for(state="visible", timeout=10000)
+    capital_input.click()
+    capital_input.fill("")
+    capital_input.fill(str(params.initial_capital))
+    step_delay(page, "设置初始资金")
+
+    freq_container = page.locator(".frequency-selector-ide")
+    freq_container.locator(".dropdown-toggle").click()
+    page.wait_for_timeout(500)
+    freq_container.locator(".dropdown-menu li").filter(has_text=params.frequency).first.click()
+    step_delay(page, "设置回测频度")
+
+    expected_freq = FREQUENCY_LABEL_TO_VALUE[params.frequency]
+    actual_freq = page.locator("input[name='backtest[frequency]']").input_value()
+    actual_start = page.locator("#startTime").input_value()
+    actual_end = page.locator("#endTime").input_value()
+    actual_capital = page.locator("input[name='backtest[baseCapital]']").input_value()
+
+    print(
+        f"  平台当前值：{actual_start[:10]} ~ {actual_end[:10]}，"
+        f"{int(float(actual_capital)):,} 元，"
+        f"频度={FREQUENCY_VALUE_TO_LABEL.get(actual_freq, actual_freq)}"
+    )
+
+    if actual_freq != expected_freq:
+        print(f"回测频度设置失败，期望 {params.frequency}，实际 {actual_freq}")
+        return False
+
+    page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_params_set.png"))
+    return True
+
+
 def compile_and_run(page: Page) -> bool:
     """点击「编译运行」。"""
-    print("\n【步骤 6】编译运行...")
+    print("\n【步骤 7】编译运行...")
     compile_btn = page.get_by_role("button", name="编译运行")
     if not compile_btn.count():
         compile_btn = page.get_by_text("编译运行", exact=True)
@@ -350,9 +463,18 @@ def run() -> None:
             sys.exit(1)
 
         dismiss_edit_prompt_if_present(page)
+
+        backtest_params = get_backtest_params()
+        if not configure_backtest_params(page, backtest_params):
+            print("回测参数设置失败")
+            print("按 Enter 关闭浏览器...")
+            input()
+            safe_close_context(context)
+            sys.exit(1)
+
         compile_and_run(page)
 
-        print(f"\n策略回测流程已完成（{strategy_name} + 编译运行）")
+        print(f"\n策略回测流程已完成（{strategy_name} + 参数配置 + 编译运行）")
         print(f"截图目录：{SCREENSHOTS_DIR}")
         print("\n浏览器保持打开。按 Enter 关闭...")
         input()

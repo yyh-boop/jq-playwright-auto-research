@@ -1,9 +1,8 @@
+# -*- coding: utf-8 -*-
 """
-Playwright + Microsoft Edge 聚宽平台自动化练习
+Playwright + Microsoft Edge 聚宽平台自动化练习（feature/backtest：策略回测）
 
-- 使用本机 Microsoft Edge（channel="msedge"）
-- 登录状态保存在 edge_profile/，登录成功后 Cookie 会自动复用
-- 打开聚宽登录页并用账号密码登录
+流程：登录 → 策略回测 → 新建策略（股票策略）→ 编译运行
 """
 
 import os
@@ -18,11 +17,14 @@ SCREENSHOTS_DIR = BASE_DIR / "screenshots"
 PROFILE_DIR = BASE_DIR / "edge_profile"
 ENV_FILE = BASE_DIR / ".env"
 
-JOINQUANT_LOGIN_URL = "https://test.demo.joinquant.com/user/login/index?type=login"
+JOINQUANT_LOGIN_URL = "https://www.joinquant.com/user/login/index?type=login"
+JOINQUANT_HOME_URL = "https://www.joinquant.com/view/user/floor?type=creditsdesc"
+JOINQUANT_STRATEGY_LIST_URL = "https://www.joinquant.com/algorithm/index/list"
+MANUAL_LOGIN_TIMEOUT = 300
+CLICK_WAIT_SECONDS = 3
 
 
 def load_env() -> None:
-    """从 .env 文件加载环境变量（若存在）。"""
     if not ENV_FILE.exists():
         return
     for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
@@ -46,39 +48,190 @@ def get_credentials() -> tuple[str, str]:
     return username, password
 
 
-def login_joinquant(page: Page, username: str, password: str) -> None:
-    """打开聚宽登录页，使用手机号 + 密码登录。"""
+def create_browser_context(playwright):
+    """启动 Edge，使用 edge_profile 持久化 Cookie。"""
+    context = playwright.chromium.launch_persistent_context(
+        user_data_dir=str(PROFILE_DIR),
+        channel="msedge",
+        headless=False,
+        viewport={"width": 1280, "height": 800},
+        locale="zh-CN",
+        ignore_default_args=["--enable-automation"],
+        args=["--disable-blink-features=AutomationControlled"],
+    )
+    context.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+    )
+    return context
+
+
+def wait_after_click(page: Page) -> None:
+    page.wait_for_timeout(CLICK_WAIT_SECONDS * 1000)
+
+
+def human_type(locator, text: str) -> None:
+    locator.click()
+    locator.fill("")
+    locator.press_sequentially(text, delay=80)
+
+
+def is_login_page(page: Page) -> bool:
+    if "/user/login" in page.url:
+        return True
+    login_form = page.locator('input[name="username"]')
+    return login_form.count() > 0 and login_form.first.is_visible()
+
+
+def is_logged_in(page: Page) -> bool:
+    return not is_login_page(page)
+
+
+def try_restore_session(page: Page) -> bool:
+    print(f"直接访问：{JOINQUANT_HOME_URL}")
+    page.goto(JOINQUANT_HOME_URL, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(2000)
+
+    if is_logged_in(page):
+        print("当前 URL：", page.url)
+        return True
+
+    print("Cookie 已失效或未登录，需要重新登录")
+    return False
+
+
+def wait_for_manual_captcha(page: Page) -> bool:
+    print("\n" + "=" * 52)
+    print("  已自动点击「登录」")
+    print("  若出现滑块验证码，请在浏览器中手动拖动完成")
+    print("  完成后脚本会自动继续")
+    print(f"  最长等待 {MANUAL_LOGIN_TIMEOUT} 秒")
+    print("=" * 52 + "\n")
+
+    for i in range(MANUAL_LOGIN_TIMEOUT):
+        if is_logged_in(page):
+            print("登录成功")
+            return True
+        if i > 0 and i % 30 == 0:
+            print(f"  仍在等待...（{i} 秒）")
+        page.wait_for_timeout(1000)
+
+    page.screenshot(path=str(SCREENSHOTS_DIR / "login_captcha_timeout.png"))
+    return False
+
+
+def perform_login(page: Page, username: str, password: str) -> bool:
     print(f"打开登录页：{JOINQUANT_LOGIN_URL}")
     page.goto(JOINQUANT_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
     page.wait_for_timeout(1500)
 
     page.get_by_text("密码登录", exact=True).click()
-    page.locator('input[name="username"]').fill(username)
-    page.locator('input[name="pwd"]').fill(password)
+    human_type(page.locator('input[name="username"]'), username)
+    human_type(page.locator('input[name="pwd"]'), password)
 
     agreement = page.locator("input[type='checkbox']:visible")
     if agreement.count() and not agreement.first.is_checked():
         agreement.first.check()
 
-    submit_btn = page.locator("button.btnPwdSubmit")
-    submit_btn.wait_for(state="visible", timeout=10000)
-    submit_btn.click()
-
-    page.wait_for_load_state("domcontentloaded", timeout=30000)
+    print("自动点击「登录」...")
+    page.locator("button.btnPwdSubmit").click()
     page.wait_for_timeout(2000)
 
+    if is_logged_in(page):
+        return True
 
-def is_login_success(page: Page) -> bool:
-    if "/user/login" in page.url:
+    return wait_for_manual_captcha(page)
+
+
+def ensure_logged_in(page: Page, username: str, password: str) -> bool:
+    print("【步骤 1】尝试复用 edge_profile 中已保存的登录态...")
+    if try_restore_session(page):
+        print("已复用登录态，跳过登录页（不会触发验证码）")
+        return True
+
+    print("\n【步骤 2】需要重新登录...")
+    if not perform_login(page, username, password):
         return False
-    error = page.locator(".error, .err-msg, .login-error, .toast-error")
-    if error.count() and error.first.is_visible():
-        return False
+
+    page.goto(JOINQUANT_HOME_URL, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(2000)
+    return is_logged_in(page)
+
+
+def go_to_strategy_backtest(page: Page) -> bool:
+    """顶栏「量化研究平台」→「策略回测」，失败则直接跳转策略列表。"""
+    print("\n【步骤 3】打开策略回测...")
+    if "/view/user/floor" not in page.url:
+        page.goto(JOINQUANT_HOME_URL, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(2000)
+
+    nav = page.locator("a").filter(has_text="量化研究平台").first
+    backtest_href = "/algorithm/index/list"
+    clicked = False
+
+    if nav.count() and nav.is_visible():
+        nav.hover()
+        page.wait_for_timeout(800)
+        backtest_link = page.locator(f"a[href='{backtest_href}']").filter(has_text="策略回测")
+        if not backtest_link.count():
+            backtest_link = page.locator(f"a[href='{backtest_href}']")
+        try:
+            backtest_link.first.wait_for(state="visible", timeout=5000)
+            backtest_link.first.click()
+            page.wait_for_load_state("domcontentloaded", timeout=30000)
+            wait_after_click(page)
+            clicked = True
+        except PlaywrightError:
+            print("悬停后未能点击「策略回测」，改为直接访问策略列表")
+
+    if not clicked:
+        if not nav.count() or not nav.is_visible():
+            print("未找到顶栏导航，改为直接访问策略列表")
+        page.goto(JOINQUANT_STRATEGY_LIST_URL, wait_until="domcontentloaded", timeout=30000)
+
+    page.wait_for_selector("text=策略列表", timeout=15000)
+    print("策略列表页：", page.url)
+    page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_strategy_list.png"))
+    return "/algorithm/index/list" in page.url
+
+
+def create_stock_strategy(page: Page) -> bool:
+    """点击「新建策略」→「股票策略」。"""
+    print("\n【步骤 4】新建股票策略...")
+    new_btn = page.locator("button").filter(has_text="新建策略")
+    if not new_btn.count():
+        new_btn = page.get_by_text("新建策略", exact=False)
+    new_btn.first.click()
+    wait_after_click(page)
+
+    stock_option = page.get_by_text("股票策略", exact=True)
+    stock_option.wait_for(state="visible", timeout=10000)
+    stock_option.click()
+    page.wait_for_load_state("domcontentloaded", timeout=30000)
+    wait_after_click(page)
+
+    page.wait_for_url("**/algorithm/index/edit**", timeout=30000)
+    print("策略编辑器：", page.url)
+    page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_stock_editor.png"))
+    return "type=stock" in page.url
+
+
+def compile_and_run(page: Page) -> bool:
+    """点击「编译运行」。"""
+    print("\n【步骤 5】编译运行...")
+    compile_btn = page.get_by_role("button", name="编译运行")
+    if not compile_btn.count():
+        compile_btn = page.get_by_text("编译运行", exact=True)
+    compile_btn.first.wait_for(state="visible", timeout=15000)
+    compile_btn.first.click()
+    wait_after_click(page)
+    page.wait_for_timeout(5000)
+
+    page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_compile_run.png"))
+    print("已点击「编译运行」，等待回测结果...")
     return True
 
 
 def safe_close_context(context) -> None:
-    """安全关闭浏览器，避免用户已手动关窗时再 close 报错。"""
     try:
         context.close()
     except PlaywrightError:
@@ -90,37 +243,43 @@ def run() -> None:
     SCREENSHOTS_DIR.mkdir(exist_ok=True)
     PROFILE_DIR.mkdir(exist_ok=True)
 
-    with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            channel="msedge",
-            headless=False,
-            viewport={"width": 1280, "height": 800},
-            locale="zh-CN",
-        )
+    print(f"浏览器数据目录：{PROFILE_DIR}")
+    print("（Cookie 保存在此，请勿删除，否则需重新登录）\n")
 
+    with sync_playwright() as p:
+        context = create_browser_context(p)
         page = context.pages[0] if context.pages else context.new_page()
 
-        print("【1/2】登录聚宽")
-        login_joinquant(page, username, password)
-
-        print("\n【2/2】检查登录结果")
-        print("页面标题：", page.title())
-        print("当前 URL：", page.url)
-
-        if is_login_success(page):
-            print("✓ 登录成功（已离开登录页）")
-        else:
-            print("✗ 登录可能失败，请检查账号密码或页面提示")
+        if not ensure_logged_in(page, username, password):
+            print("登录失败")
             page.screenshot(path=str(SCREENSHOTS_DIR / "joinquant_login_failed.png"))
-            print(f"失败截图 → {SCREENSHOTS_DIR / 'joinquant_login_failed.png'}")
+            print("按 Enter 关闭浏览器...")
+            input()
+            safe_close_context(context)
+            sys.exit(1)
 
-        page.screenshot(path=str(SCREENSHOTS_DIR / "joinquant_after_login.png"))
-        print(f"当前页截图 → {SCREENSHOTS_DIR / 'joinquant_after_login.png'}")
+        print("\n登录验证通过")
 
-        print("\n浏览器保持打开。查看完毕后：")
-        print("  - 在终端按 Enter 关闭浏览器；或")
-        print("  - 直接关闭浏览器窗口也可以")
+        if not go_to_strategy_backtest(page):
+            print("未能进入策略回测页面")
+            page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_nav_failed.png"))
+            print("按 Enter 关闭浏览器...")
+            input()
+            safe_close_context(context)
+            sys.exit(1)
+
+        if not create_stock_strategy(page):
+            print("未能创建股票策略")
+            print("按 Enter 关闭浏览器...")
+            input()
+            safe_close_context(context)
+            sys.exit(1)
+
+        compile_and_run(page)
+
+        print("\n策略回测流程已完成（新建股票策略 + 编译运行）")
+        print(f"截图目录：{SCREENSHOTS_DIR}")
+        print("\n浏览器保持打开。按 Enter 关闭...")
         input()
         safe_close_context(context)
         print("流程结束！")

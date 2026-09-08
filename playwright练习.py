@@ -2,10 +2,11 @@
 """
 Playwright + Microsoft Edge 聚宽平台自动化练习（feature/backtest：策略回测）
 
-流程：登录 → 策略回测 → 新建策略（股票策略）→ 编译运行
+流程：登录 → 策略回测 → 打开「自动化测试用」→ 关闭提示弹窗 → 编译运行
 """
 
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -20,8 +21,11 @@ ENV_FILE = BASE_DIR / ".env"
 JOINQUANT_LOGIN_URL = "https://www.joinquant.com/user/login/index?type=login"
 JOINQUANT_HOME_URL = "https://www.joinquant.com/view/user/floor?type=creditsdesc"
 JOINQUANT_STRATEGY_LIST_URL = "https://www.joinquant.com/algorithm/index/list"
+JOINQUANT_BASE_URL = "https://www.joinquant.com"
+DEFAULT_STRATEGY_NAME = "自动化测试用"
 MANUAL_LOGIN_TIMEOUT = 300
-CLICK_WAIT_SECONDS = 3
+STEP_DELAY_MIN = 3
+STEP_DELAY_MAX = 8
 
 
 def load_env() -> None:
@@ -33,6 +37,11 @@ def load_env() -> None:
             continue
         key, value = line.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip())
+
+
+def get_strategy_name() -> str:
+    load_env()
+    return os.getenv("JOINQUANT_STRATEGY_NAME", DEFAULT_STRATEGY_NAME).strip() or DEFAULT_STRATEGY_NAME
 
 
 def get_credentials() -> tuple[str, str]:
@@ -65,8 +74,14 @@ def create_browser_context(playwright):
     return context
 
 
-def wait_after_click(page: Page) -> None:
-    page.wait_for_timeout(CLICK_WAIT_SECONDS * 1000)
+def step_delay(page: Page, label: str = "") -> None:
+    """每步操作后随机等待 3~8 秒。"""
+    seconds = random.randint(STEP_DELAY_MIN, STEP_DELAY_MAX)
+    if label:
+        print(f"  等待 {seconds}s（{label}）")
+    else:
+        print(f"  等待 {seconds}s")
+    page.wait_for_timeout(seconds * 1000)
 
 
 def human_type(locator, text: str) -> None:
@@ -89,7 +104,7 @@ def is_logged_in(page: Page) -> bool:
 def try_restore_session(page: Page) -> bool:
     print(f"直接访问：{JOINQUANT_HOME_URL}")
     page.goto(JOINQUANT_HOME_URL, wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(2000)
+    step_delay(page, "检测登录态")
 
     if is_logged_in(page):
         print("当前 URL：", page.url)
@@ -110,6 +125,7 @@ def wait_for_manual_captcha(page: Page) -> bool:
     for i in range(MANUAL_LOGIN_TIMEOUT):
         if is_logged_in(page):
             print("登录成功")
+            step_delay(page, "登录成功后")
             return True
         if i > 0 and i % 30 == 0:
             print(f"  仍在等待...（{i} 秒）")
@@ -122,11 +138,13 @@ def wait_for_manual_captcha(page: Page) -> bool:
 def perform_login(page: Page, username: str, password: str) -> bool:
     print(f"打开登录页：{JOINQUANT_LOGIN_URL}")
     page.goto(JOINQUANT_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(1500)
+    step_delay(page, "打开登录页")
 
     page.get_by_text("密码登录", exact=True).click()
+    step_delay(page, "切换密码登录")
     human_type(page.locator('input[name="username"]'), username)
     human_type(page.locator('input[name="pwd"]'), password)
+    step_delay(page, "填写账号密码")
 
     agreement = page.locator("input[type='checkbox']:visible")
     if agreement.count() and not agreement.first.is_checked():
@@ -134,7 +152,7 @@ def perform_login(page: Page, username: str, password: str) -> bool:
 
     print("自动点击「登录」...")
     page.locator("button.btnPwdSubmit").click()
-    page.wait_for_timeout(2000)
+    step_delay(page, "点击登录")
 
     if is_logged_in(page):
         return True
@@ -153,7 +171,7 @@ def ensure_logged_in(page: Page, username: str, password: str) -> bool:
         return False
 
     page.goto(JOINQUANT_HOME_URL, wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(2000)
+    step_delay(page, "登录后进入首页")
     return is_logged_in(page)
 
 
@@ -162,7 +180,7 @@ def go_to_strategy_backtest(page: Page) -> bool:
     print("\n【步骤 3】打开策略回测...")
     if "/view/user/floor" not in page.url:
         page.goto(JOINQUANT_HOME_URL, wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(2000)
+        step_delay(page, "进入首页")
 
     nav = page.locator("a").filter(has_text="量化研究平台").first
     backtest_href = "/algorithm/index/list"
@@ -178,7 +196,7 @@ def go_to_strategy_backtest(page: Page) -> bool:
             backtest_link.first.wait_for(state="visible", timeout=5000)
             backtest_link.first.click()
             page.wait_for_load_state("domcontentloaded", timeout=30000)
-            wait_after_click(page)
+            step_delay(page, "点击策略回测")
             clicked = True
         except PlaywrightError:
             print("悬停后未能点击「策略回测」，改为直接访问策略列表")
@@ -187,6 +205,7 @@ def go_to_strategy_backtest(page: Page) -> bool:
         if not nav.count() or not nav.is_visible():
             print("未找到顶栏导航，改为直接访问策略列表")
         page.goto(JOINQUANT_STRATEGY_LIST_URL, wait_until="domcontentloaded", timeout=30000)
+        step_delay(page, "进入策略列表")
 
     page.wait_for_selector("text=策略列表", timeout=15000)
     print("策略列表页：", page.url)
@@ -194,37 +213,90 @@ def go_to_strategy_backtest(page: Page) -> bool:
     return "/algorithm/index/list" in page.url
 
 
-def create_stock_strategy(page: Page) -> bool:
-    """点击「新建策略」→「股票策略」。"""
-    print("\n【步骤 4】新建股票策略...")
-    new_btn = page.locator("button").filter(has_text="新建策略")
-    if not new_btn.count():
-        new_btn = page.get_by_text("新建策略", exact=False)
-    new_btn.first.click()
-    wait_after_click(page)
+def open_existing_strategy(page: Page, strategy_name: str) -> bool:
+    """在策略列表中打开已有策略，进入编辑器。"""
+    print(f"\n【步骤 4】打开策略「{strategy_name}」...")
+    page.wait_for_selector("text=策略列表", timeout=15000)
 
-    stock_option = page.get_by_text("股票策略", exact=True)
-    stock_option.wait_for(state="visible", timeout=10000)
-    stock_option.click()
-    page.wait_for_load_state("domcontentloaded", timeout=30000)
-    wait_after_click(page)
+    strategy_link = page.locator("a[href*='/algorithm/index/edit']").filter(has_text=strategy_name)
+    if not strategy_link.count():
+        strategy_link = page.get_by_role("link", name=strategy_name)
+    if not strategy_link.count():
+        strategy_link = page.locator("table tbody tr").filter(has_text=strategy_name).locator("a")
 
-    page.wait_for_url("**/algorithm/index/edit**", timeout=30000)
+    if not strategy_link.count():
+        print(f"未在列表中找到策略「{strategy_name}」")
+        page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_strategy_not_found.png"))
+        return False
+
+    href = strategy_link.first.get_attribute("href")
+    if href:
+        if not href.startswith("http"):
+            href = JOINQUANT_BASE_URL + href
+        print(f"进入编辑器：{href}")
+        page.goto(href, wait_until="domcontentloaded", timeout=30000)
+    else:
+        strategy_link.first.click()
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+
+    step_delay(page, "进入策略编辑器")
+
+    if "/algorithm/index/edit" not in page.url:
+        try:
+            page.wait_for_url("**/algorithm/index/edit**", timeout=15000)
+        except PlaywrightError:
+            print("未能进入策略编辑器")
+            page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_strategy_open_failed.png"))
+            return False
+
     print("策略编辑器：", page.url)
-    page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_stock_editor.png"))
-    return "type=stock" in page.url
+    page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_strategy_editor.png"))
+    return True
+
+
+def dismiss_edit_prompt_if_present(page: Page) -> None:
+    """检测编辑器「提示」弹窗，若有则点击「不再提示」。"""
+    print("\n【步骤 5】检测提示弹窗...")
+
+    dont_show_btn = page.get_by_role("button", name="不再提示")
+    if not dont_show_btn.count():
+        dont_show_btn = page.get_by_text("不再提示", exact=True)
+
+    try:
+        dont_show_btn.first.wait_for(state="visible", timeout=5000)
+    except PlaywrightError:
+        print("未检测到提示弹窗，继续执行")
+        step_delay(page, "无弹窗，继续")
+        return
+
+    if dont_show_btn.count() and dont_show_btn.first.is_visible():
+        print("检测到提示弹窗，点击「不再提示」...")
+        dont_show_btn.first.click()
+        step_delay(page, "关闭提示弹窗")
+        return
+
+    confirm_btn = page.get_by_role("button", name="确定")
+    if not confirm_btn.count():
+        confirm_btn = page.get_by_text("确定", exact=True)
+    if confirm_btn.count() and confirm_btn.first.is_visible():
+        print("未找到「不再提示」，改为点击「确定」关闭弹窗...")
+        confirm_btn.first.click()
+        step_delay(page, "关闭提示弹窗")
+        return
+
+    print("弹窗存在但未识别按钮，继续执行")
+    step_delay(page, "弹窗处理结束")
 
 
 def compile_and_run(page: Page) -> bool:
     """点击「编译运行」。"""
-    print("\n【步骤 5】编译运行...")
+    print("\n【步骤 6】编译运行...")
     compile_btn = page.get_by_role("button", name="编译运行")
     if not compile_btn.count():
         compile_btn = page.get_by_text("编译运行", exact=True)
     compile_btn.first.wait_for(state="visible", timeout=15000)
     compile_btn.first.click()
-    wait_after_click(page)
-    page.wait_for_timeout(5000)
+    step_delay(page, "点击编译运行")
 
     page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_compile_run.png"))
     print("已点击「编译运行」，等待回测结果...")
@@ -244,7 +316,8 @@ def run() -> None:
     PROFILE_DIR.mkdir(exist_ok=True)
 
     print(f"浏览器数据目录：{PROFILE_DIR}")
-    print("（Cookie 保存在此，请勿删除，否则需重新登录）\n")
+    print("（Cookie 保存在此，请勿删除，否则需重新登录）")
+    print(f"每步随机等待 {STEP_DELAY_MIN}~{STEP_DELAY_MAX} 秒\n")
 
     with sync_playwright() as p:
         context = create_browser_context(p)
@@ -268,16 +341,18 @@ def run() -> None:
             safe_close_context(context)
             sys.exit(1)
 
-        if not create_stock_strategy(page):
-            print("未能创建股票策略")
+        strategy_name = get_strategy_name()
+        if not open_existing_strategy(page, strategy_name):
+            print(f"未能打开策略「{strategy_name}」")
             print("按 Enter 关闭浏览器...")
             input()
             safe_close_context(context)
             sys.exit(1)
 
+        dismiss_edit_prompt_if_present(page)
         compile_and_run(page)
 
-        print("\n策略回测流程已完成（新建股票策略 + 编译运行）")
+        print(f"\n策略回测流程已完成（{strategy_name} + 编译运行）")
         print(f"截图目录：{SCREENSHOTS_DIR}")
         print("\n浏览器保持打开。按 Enter 关闭...")
         input()

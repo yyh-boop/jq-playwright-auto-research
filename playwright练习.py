@@ -2,7 +2,7 @@
 """
 Playwright + Microsoft Edge 聚宽平台自动化练习（feature/backtest：策略回测）
 
-流程：登录 → 策略回测 → 打开「自动化测试用」→ 关闭提示弹窗 → 设置回测参数 → 编译运行
+流程：登录 → 策略回测 → 打开策略 → 设置参数 → 运行回测 → 收益概述截图
 
 回测参数在 backtest_config.py 中修改。
 """
@@ -11,6 +11,7 @@ import os
 import random
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from playwright.sync_api import Error as PlaywrightError
@@ -25,6 +26,7 @@ from backtest_config import (
 
 BASE_DIR = Path(__file__).resolve().parent
 SCREENSHOTS_DIR = BASE_DIR / "screenshots"
+RESULT_DIR = BASE_DIR / "result"
 PROFILE_DIR = BASE_DIR / "edge_profile"
 ENV_FILE = BASE_DIR / ".env"
 
@@ -36,6 +38,7 @@ DEFAULT_STRATEGY_NAME = "自动化测试用"
 MANUAL_LOGIN_TIMEOUT = 300
 STEP_DELAY_MIN = 3
 STEP_DELAY_MAX = 8
+BACKTEST_TIMEOUT = 300
 
 FREQUENCY_LABEL_TO_VALUE = {
     "每天": "day",
@@ -401,19 +404,78 @@ def configure_backtest_params(page: Page, params: BacktestParams) -> bool:
     return True
 
 
-def compile_and_run(page: Page) -> bool:
-    """点击「编译运行」。"""
-    print("\n【步骤 7】编译运行...")
-    compile_btn = page.get_by_role("button", name="编译运行")
-    if not compile_btn.count():
-        compile_btn = page.get_by_text("编译运行", exact=True)
-    compile_btn.first.wait_for(state="visible", timeout=15000)
-    compile_btn.first.click()
-    step_delay(page, "点击编译运行")
+def create_result_dir() -> Path:
+    """为本次回测创建带时间戳的结果目录。"""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    result_dir = RESULT_DIR / ts
+    result_dir.mkdir(parents=True, exist_ok=True)
+    return result_dir
 
-    page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_compile_run.png"))
-    print("已点击「编译运行」，等待回测结果...")
+
+def run_backtest(page: Page) -> bool:
+    """点击「运行回测」启动完整回测。"""
+    print("\n【步骤 7】运行回测...")
+    run_btn = page.get_by_text("运行回测", exact=True)
+    run_btn.first.wait_for(state="visible", timeout=15000)
+    run_btn.first.click()
+    step_delay(page, "点击运行回测")
     return True
+
+
+def wait_for_backtest_complete(page: Page) -> bool:
+    """等待跳转到回测详情页并出现「回测完成」。"""
+    print("\n【步骤 8】等待回测完成...")
+    print(f"  最长等待 {BACKTEST_TIMEOUT} 秒")
+
+    try:
+        page.wait_for_url("**/algorithm/backtest/detail**", timeout=BACKTEST_TIMEOUT * 1000)
+    except PlaywrightError:
+        print("回测超时：未进入回测详情页")
+        page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_run_timeout.png"))
+        return False
+
+    try:
+        page.get_by_text("回测完成", exact=False).first.wait_for(
+            state="visible", timeout=BACKTEST_TIMEOUT * 1000
+        )
+    except PlaywrightError:
+        print("回测超时：未检测到「回测完成」")
+        page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_complete_timeout.png"))
+        return False
+
+    try:
+        page.locator(".highcharts-container").first.wait_for(state="visible", timeout=30000)
+    except PlaywrightError:
+        print("  图表加载较慢，继续截图...")
+
+    step_delay(page, "回测完成")
+    print("回测详情页：", page.url)
+    return True
+
+
+def ensure_overview_tab(page: Page) -> None:
+    """确保当前展示「收益概述」（回测完成后通常已是默认页）。"""
+    active = page.locator("li.active").filter(has_text="收益概述")
+    if active.count() and active.first.is_visible():
+        return
+
+    overview_link = page.locator("li").filter(has_text="收益概述").locator("a").first
+    if overview_link.count() and overview_link.is_visible():
+        overview_link.click()
+        step_delay(page, "切换到收益概述")
+
+
+def screenshot_overview(page: Page, result_dir: Path) -> Path:
+    """截取收益概述整页（指标 + 回测曲线 + 每日盈亏 + 每日买卖）。"""
+    print("\n【步骤 9】截图收益概述...")
+    ensure_overview_tab(page)
+    page.wait_for_timeout(2000)
+
+    outfile = result_dir / "overview_full.png"
+    page.screenshot(path=str(outfile), full_page=True)
+    step_delay(page, "截图完成")
+    print(f"截图已保存：{outfile}")
+    return outfile
 
 
 def safe_close_context(context) -> None:
@@ -426,6 +488,7 @@ def safe_close_context(context) -> None:
 def run() -> None:
     username, password = get_credentials()
     SCREENSHOTS_DIR.mkdir(exist_ok=True)
+    RESULT_DIR.mkdir(exist_ok=True)
     PROFILE_DIR.mkdir(exist_ok=True)
 
     print(f"浏览器数据目录：{PROFILE_DIR}")
@@ -472,10 +535,28 @@ def run() -> None:
             safe_close_context(context)
             sys.exit(1)
 
-        compile_and_run(page)
+        result_dir = create_result_dir()
+        print(f"\n本次结果目录：{result_dir}")
 
-        print(f"\n策略回测流程已完成（{strategy_name} + 参数配置 + 编译运行）")
-        print(f"截图目录：{SCREENSHOTS_DIR}")
+        if not run_backtest(page):
+            print("未能点击运行回测")
+            print("按 Enter 关闭浏览器...")
+            input()
+            safe_close_context(context)
+            sys.exit(1)
+
+        if not wait_for_backtest_complete(page):
+            print("回测未在预期时间内完成")
+            print("按 Enter 关闭浏览器...")
+            input()
+            safe_close_context(context)
+            sys.exit(1)
+
+        overview_path = screenshot_overview(page, result_dir)
+
+        print(f"\n策略回测流程已完成（{strategy_name} + 运行回测 + 收益概述截图）")
+        print(f"截图：{overview_path}")
+        print(f"结果目录：{result_dir}")
         print("\n浏览器保持打开。按 Enter 关闭...")
         input()
         safe_close_context(context)

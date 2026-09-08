@@ -4,6 +4,9 @@ edge_profile/
 # 运行截图
 screenshots/
 
+# 回测结果（截图、Excel 等）
+result/
+
 # 账号密码（切勿提交）
 .env
 

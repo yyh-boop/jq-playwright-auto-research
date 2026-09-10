@@ -2,7 +2,7 @@
 """
 Playwright + Microsoft Edge 聚宽平台自动化练习（feature/backtest：策略回测）
 
-流程：登录 → 策略回测 → 打开策略 → 设置参数 → 运行回测 → 收益概述截图 → 交易详情/每日持仓 Excel
+流程：登录 → 策略回测 → 打开策略 → 设置参数 → 运行回测 → 收益概述截图 → 交易详情/每日持仓/性能分析 Excel
 
 回测参数在 backtest_config.py 中修改。
 """
@@ -76,6 +76,27 @@ POSITION_COLUMNS = [
     ("todayAmount", "当日买卖"),
     ("positionPersent", "仓位占比"),
     ("gainPercentStr", "盈亏比例"),
+]
+
+PERIOD_RETURN_COLUMNS = [
+    ("date", "日期"),
+    ("1month", "1个月"),
+    ("3month", "3个月"),
+    ("6month", "6个月"),
+    ("12month", "12个月"),
+]
+
+PERFORMANCE_METRICS: list[tuple[str, str]] = [
+    ("策略收益", "#tab-algorithm_period_return"),
+    ("基准收益", "#tab-benchmark_period_return"),
+    ("阿尔法", "#tab-alpha"),
+    ("贝塔", "#tab-beta"),
+    ("夏普比率", "#tab-sharpe"),
+    ("索提诺比率", "#tab-sortino"),
+    ("信息比率", "#tab-information"),
+    ("波动率", "#tab-algo_volatility"),
+    ("基准波动率", "#tab-benchmark_volatility"),
+    ("最大回撤", "#tab-max_drawdown"),
 ]
 
 EXTRACT_JQGRID_JS = """
@@ -693,6 +714,16 @@ def normalize_grid_row(row: dict) -> dict:
     return normalized
 
 
+def normalize_grid_rows(rows: list[dict]) -> list[dict]:
+    """批量清理 jqGrid / API 行数据。"""
+    return [normalize_grid_row(row) for row in rows]
+
+
+def tab_href_to_grid_id(href: str) -> str:
+    """性能分析 tab href → jqGrid 表格 id，如 #tab-alpha → table-alpha。"""
+    return "table-" + href.removeprefix("#tab-")
+
+
 def fetch_all_positions_via_api(page: Page) -> list[dict]:
     """
     通过聚宽 positionInfo 接口分页拉取完整「每日持仓&收益」。
@@ -707,7 +738,7 @@ def fetch_all_positions_via_api(page: Page) -> list[dict]:
     if result.get("error"):
         raise RuntimeError(str(result["error"]))
 
-    rows = [normalize_grid_row(row) for row in result.get("rows", [])]
+    rows = normalize_grid_rows(result.get("rows", []))
     if not rows:
         raise RuntimeError("每日持仓&收益为空")
 
@@ -726,15 +757,24 @@ def save_grid_to_excel(
     outfile: Path,
     sheet_name: str,
 ) -> None:
-    """将 jqGrid 行数据按列定义保存为 Excel。"""
+    """将 jqGrid 行数据按列定义保存为 Excel（单 sheet）。"""
+    save_grids_to_excel([(sheet_name, rows, columns)], outfile)
+
+
+def save_grids_to_excel(
+    sheets: list[tuple[str, list[dict], list[tuple[str, str]]]],
+    outfile: Path,
+) -> None:
+    """将多组 jqGrid 行数据保存为 Excel 多 sheet。"""
     from openpyxl import Workbook
 
     wb = Workbook()
-    ws = wb.active
-    ws.title = sheet_name
-    ws.append([label for _, label in columns])
-    for row in rows:
-        ws.append([row.get(key, "") for key, _ in columns])
+    wb.remove(wb.active)
+    for sheet_name, rows, columns in sheets:
+        ws = wb.create_sheet(title=sheet_name[:31])
+        ws.append([label for _, label in columns])
+        for row in rows:
+            ws.append([row.get(key, "") for key, _ in columns])
     wb.save(outfile)
 
 
@@ -784,6 +824,46 @@ def save_daily_positions(page: Page, result_dir: Path) -> Path:
     save_grid_to_excel(rows, POSITION_COLUMNS, outfile, "每日持仓收益")
     step_delay(page, "保存每日持仓&收益")
     print(f"每日持仓&收益已保存：{outfile}（共 {len(rows)} 条）")
+    return outfile
+
+
+def open_risk_metric(page: Page, href: str, name: str) -> None:
+    """在收益概述页切换到左侧性能分析子项。"""
+    ensure_overview_tab(page)
+    link = page.locator(f"a.risk[href='{href}']")
+    link.wait_for(state="visible", timeout=15000)
+    link.click()
+    step_delay(page, f"切换到{name}")
+
+
+def fetch_risk_metric_rows(page: Page, grid_id: str) -> list[dict]:
+    """读取性能分析 jqGrid 表格并统一清理行数据。"""
+    page.wait_for_selector(f"#{grid_id} tr.jqgrow", timeout=30000)
+    page.wait_for_timeout(500)
+    rows = extract_jqgrid_rows(page, grid_id)
+    return normalize_grid_rows(rows)
+
+
+def save_performance_metrics(page: Page, result_dir: Path) -> Path:
+    """保存收益概述下「策略收益」至「最大回撤」共 10 项性能分析表格。"""
+    print("\n【步骤 12】保存性能分析（策略收益~最大回撤）...")
+    ensure_overview_tab(page)
+
+    sheets: list[tuple[str, list[dict], list[tuple[str, str]]]] = []
+    for name, href in PERFORMANCE_METRICS:
+        grid_id = tab_href_to_grid_id(href)
+        open_risk_metric(page, href, name)
+        rows = fetch_risk_metric_rows(page, grid_id)
+        if not rows:
+            page.screenshot(path=str(result_dir / f"perf_{grid_id}_empty.png"))
+            raise RuntimeError(f"「{name}」数据为空")
+        sheets.append((name, rows, PERIOD_RETURN_COLUMNS))
+        print(f"  {name}：{len(rows)} 行")
+
+    outfile = result_dir / "performance_metrics.xlsx"
+    save_grids_to_excel(sheets, outfile)
+    step_delay(page, "保存性能分析")
+    print(f"性能分析已保存：{outfile}（共 {len(sheets)} 个指标）")
     return outfile
 
 
@@ -866,6 +946,7 @@ def run() -> None:
         try:
             trade_path = save_trade_details(page, result_dir)
             positions_path = save_daily_positions(page, result_dir)
+            performance_path = save_performance_metrics(page, result_dir)
         except RuntimeError as exc:
             print(exc)
             print("按 Enter 关闭浏览器...")
@@ -877,6 +958,7 @@ def run() -> None:
         print(f"收益概述截图：{overview_path}")
         print(f"交易详情 Excel：{trade_path}")
         print(f"每日持仓 Excel：{positions_path}")
+        print(f"性能分析 Excel：{performance_path}")
         print(f"结果目录：{result_dir}")
         print("\n浏览器保持打开。按 Enter 关闭...")
         input()

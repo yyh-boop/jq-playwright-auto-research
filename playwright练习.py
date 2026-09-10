@@ -2,13 +2,14 @@
 """
 Playwright + Microsoft Edge 聚宽平台自动化练习（feature/backtest：策略回测）
 
-流程：登录 → 策略回测 → 打开策略 → 设置参数 → 运行回测 → 收益概述截图
+流程：登录 → 策略回测 → 打开策略 → 设置参数 → 运行回测 → 收益概述截图 → 交易详情/每日持仓 Excel
 
 回测参数在 backtest_config.py 中修改。
 """
 
 import os
 import random
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -39,6 +40,117 @@ MANUAL_LOGIN_TIMEOUT = 300
 STEP_DELAY_MIN = 3
 STEP_DELAY_MAX = 8
 BACKTEST_TIMEOUT = 300
+
+TRANSACTION_COLUMNS = [
+    ("date", "日期"),
+    ("time", "委托时间"),
+    ("security", "品种"),
+    ("stock", "标的"),
+    ("transaction", "交易类型"),
+    ("type", "下单类型"),
+    ("amount", "成交数量"),
+    ("price", "成交价"),
+    ("total", "成交额"),
+    ("orderAmount", "委托数量"),
+    ("limitPrice", "委托价格"),
+    ("status", "状态"),
+    ("gains", "平仓盈亏"),
+    ("commission", "手续费"),
+    ("matchTime", "最后更新时间"),
+]
+
+POSITION_COLUMNS = [
+    ("date", "日期"),
+    ("security", "品种"),
+    ("stock", "标的"),
+    ("side", "多空"),
+    ("amount", "数量"),
+    ("closeableAmount", "可卖数量"),
+    ("price", "价格"),
+    ("value", "市值"),
+    ("gain", "浮动盈亏"),
+    ("avgCost", "累计成本"),
+    ("holdCost", "持仓成本"),
+    ("margin", "保证金"),
+    ("dailyGains", "当日收益"),
+    ("todayAmount", "当日买卖"),
+    ("positionPersent", "仓位占比"),
+    ("gainPercentStr", "盈亏比例"),
+]
+
+EXTRACT_JQGRID_JS = """
+(gridId) => {
+  const grid = window.jQuery ? window.jQuery('#' + gridId) : null;
+  if (!grid || !grid.length || !grid.jqGrid) return [];
+  const stripHtml = (value) => {
+    const el = document.createElement('div');
+    el.innerHTML = value ?? '';
+    return (el.textContent || el.innerText || '').trim();
+  };
+  return grid.jqGrid('getDataIDs').map(id => {
+    const row = grid.jqGrid('getRowData', id);
+    const cleaned = {};
+    for (const [key, value] of Object.entries(row)) {
+      cleaned[key] = stripHtml(String(value));
+    }
+    return cleaned;
+  });
+}
+"""
+
+FETCH_ALL_POSITIONS_JS = """
+async () => {
+  const api = window.backtestAPI?.positionInfo;
+  const id = window.backtestId;
+  if (!api || !id) return { error: '未找到 positionInfo 接口' };
+
+  const all = [];
+  let offset = 0;
+  let dateOffset = '';
+  let rounds = 0;
+
+  while (rounds < 200) {
+    rounds += 1;
+    const qs = new URLSearchParams({
+      backtestId: id,
+      offset: String(offset),
+      dateOffset: dateOffset,
+    });
+    const resp = await fetch(api + '?' + qs.toString(), { credentials: 'include' })
+      .then(r => r.json());
+    if (resp.code === 403) return { error: '无权限查看持仓数据' };
+
+    const batch = resp.data?.position || [];
+    if (batch.length === 0) {
+      const dates = all.map(r => r.date).filter(Boolean).sort();
+      return {
+        rows: all,
+        total: all.length,
+        minDate: dates[0] || '',
+        maxDate: dates[dates.length - 1] || '',
+        rounds,
+      };
+    }
+
+    all.push(...batch);
+    offset = all.length;
+    dateOffset = batch[batch.length - 1].date;
+  }
+
+  const dates = all.map(r => r.date).filter(Boolean).sort();
+  return {
+    rows: all,
+    total: all.length,
+    minDate: dates[0] || '',
+    maxDate: dates[dates.length - 1] || '',
+    rounds,
+    truncated: true,
+  };
+}
+"""
+
+HTML_TAG_RE = re.compile(r"<[^>]+>")
+
 
 FREQUENCY_LABEL_TO_VALUE = {
     "每天": "day",
@@ -478,6 +590,203 @@ def screenshot_overview(page: Page, result_dir: Path) -> Path:
     return outfile
 
 
+def open_detail_tab(page: Page, tab_selector: str, tab_name: str) -> None:
+    """打开回测详情左侧标签页。"""
+    tab = page.locator(tab_selector)
+    tab.wait_for(state="visible", timeout=15000)
+    tab.click()
+    step_delay(page, f"切换到{tab_name}")
+
+
+def extract_jqgrid_rows(page: Page, grid_id: str) -> list[dict]:
+    """从 jqGrid 表格读取全部行数据。"""
+    rows = page.evaluate(EXTRACT_JQGRID_JS, grid_id)
+    return rows if isinstance(rows, list) else []
+
+
+def ensure_jqgrid_fully_loaded(page: Page, grid_id: str, label: str = "") -> int:
+    """
+    滚动 jqGrid 虚拟列表，触发懒加载，直到行数达到 records 或不再增长。
+
+    聚宽「每日持仓&收益」等表格初次只渲染部分行，向下滑动后才会加载剩余数据。
+    """
+    body_selector = f"#gview_{grid_id} .ui-jqgrid-bdiv"
+    prefix = f"  [{label}] " if label else "  "
+
+    try:
+        page.wait_for_selector(body_selector, timeout=15000)
+    except PlaywrightError:
+        info = page.evaluate(
+            """
+            (gridId) => {
+              const grid = window.jQuery('#' + gridId);
+              if (!grid.length) return { ids: 0, records: 0 };
+              return {
+                ids: grid.jqGrid('getDataIDs').length,
+                records: grid.jqGrid('getGridParam', 'records') || 0,
+              };
+            }
+            """,
+            grid_id,
+        )
+        return info.get("ids", 0)
+
+    last_count = -1
+    stable_rounds = 0
+
+    for _ in range(40):
+        page.evaluate(
+            """
+            (gridId) => {
+              const body = document.querySelector('#gview_' + gridId + ' .ui-jqgrid-bdiv');
+              if (body) body.scrollTop = body.scrollHeight;
+            }
+            """,
+            grid_id,
+        )
+        page.wait_for_timeout(600)
+
+        info = page.evaluate(
+            """
+            (gridId) => {
+              const grid = window.jQuery('#' + gridId);
+              return {
+                ids: grid.jqGrid('getDataIDs').length,
+                records: grid.jqGrid('getGridParam', 'records') || 0,
+              };
+            }
+            """,
+            grid_id,
+        )
+        ids = info["ids"]
+        records = info["records"]
+
+        if records > 0 and ids >= records:
+            print(f"{prefix}已加载全部 {ids} 行")
+            return ids
+
+        if ids == last_count:
+            stable_rounds += 1
+            if stable_rounds >= 3:
+                print(f"{prefix}行数稳定在 {ids}（records={records}）")
+                return ids
+        elif last_count >= 0 and ids > last_count:
+            print(f"{prefix}滚动加载：{last_count} → {ids} 行")
+
+        last_count = ids
+        stable_rounds = 0
+
+    print(f"{prefix}达到最大滚动次数，当前 {last_count} 行")
+    return last_count
+
+
+def normalize_grid_row(row: dict) -> dict:
+    """清理 jqGrid / API 行里的 HTML 标签，统一为字符串。"""
+    normalized: dict[str, str] = {}
+    for key, value in row.items():
+        if value is None:
+            normalized[key] = ""
+        elif isinstance(value, str):
+            normalized[key] = HTML_TAG_RE.sub("", value).strip()
+        else:
+            normalized[key] = str(value)
+    return normalized
+
+
+def fetch_all_positions_via_api(page: Page) -> list[dict]:
+    """
+    通过聚宽 positionInfo 接口分页拉取完整「每日持仓&收益」。
+
+    页面 jqGrid 只懒加载到约 4 月，完整数据需走与 addPosition 相同的 API。
+    """
+    print("  通过 positionInfo 接口分页拉取...")
+    result = page.evaluate(FETCH_ALL_POSITIONS_JS)
+    if not isinstance(result, dict):
+        raise RuntimeError("持仓接口返回异常")
+
+    if result.get("error"):
+        raise RuntimeError(str(result["error"]))
+
+    rows = [normalize_grid_row(row) for row in result.get("rows", [])]
+    if not rows:
+        raise RuntimeError("每日持仓&收益为空")
+
+    print(
+        f"  共 {len(rows)} 条，日期 {result.get('minDate', '')} ~ {result.get('maxDate', '')}"
+        f"（{result.get('rounds', 0)} 次请求）"
+    )
+    if result.get("truncated"):
+        print("  警告：达到最大分页次数，数据可能不完整")
+    return rows
+
+
+def save_grid_to_excel(
+    rows: list[dict],
+    columns: list[tuple[str, str]],
+    outfile: Path,
+    sheet_name: str,
+) -> None:
+    """将 jqGrid 行数据按列定义保存为 Excel。"""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    ws.append([label for _, label in columns])
+    for row in rows:
+        ws.append([row.get(key, "") for key, _ in columns])
+    wb.save(outfile)
+
+
+def save_transactions_to_excel(rows: list[dict], outfile: Path) -> None:
+    """将交易详情保存为 Excel。"""
+    save_grid_to_excel(rows, TRANSACTION_COLUMNS, outfile, "交易详情")
+
+
+def save_trade_details(page: Page, result_dir: Path) -> Path:
+    """进入「交易详情」并保存为 Excel。"""
+    print("\n【步骤 10】保存交易详情...")
+    open_detail_tab(page, "#transactions-tab", "交易详情")
+
+    page.wait_for_selector("#table-transactioninfo tr.jqgrow", timeout=30000)
+    page.wait_for_timeout(1000)
+
+    ensure_jqgrid_fully_loaded(page, "table-transactioninfo", "交易详情")
+    rows = extract_jqgrid_rows(page, "table-transactioninfo")
+    if not rows:
+        print("未读取到交易记录")
+        page.screenshot(path=str(result_dir / "trade_details_empty.png"))
+        raise RuntimeError("交易详情为空")
+
+    outfile = result_dir / "trade_details.xlsx"
+    save_transactions_to_excel(rows, outfile)
+    step_delay(page, "保存交易详情")
+    print(f"交易详情已保存：{outfile}（共 {len(rows)} 条）")
+    return outfile
+
+
+def save_daily_positions(page: Page, result_dir: Path) -> Path:
+    """进入「每日持仓&收益」并通过 API 保存完整 Excel。"""
+    print("\n【步骤 11】保存每日持仓&收益...")
+    open_detail_tab(page, "#positions-tab", "每日持仓&收益")
+
+    page.wait_for_selector("#table-positioninfo", timeout=30000)
+    page.wait_for_timeout(1000)
+
+    try:
+        rows = fetch_all_positions_via_api(page)
+    except RuntimeError as exc:
+        print(exc)
+        page.screenshot(path=str(result_dir / "daily_positions_empty.png"))
+        raise
+
+    outfile = result_dir / "daily_positions.xlsx"
+    save_grid_to_excel(rows, POSITION_COLUMNS, outfile, "每日持仓收益")
+    step_delay(page, "保存每日持仓&收益")
+    print(f"每日持仓&收益已保存：{outfile}（共 {len(rows)} 条）")
+    return outfile
+
+
 def safe_close_context(context) -> None:
     try:
         context.close()
@@ -554,8 +863,20 @@ def run() -> None:
 
         overview_path = screenshot_overview(page, result_dir)
 
-        print(f"\n策略回测流程已完成（{strategy_name} + 运行回测 + 收益概述截图）")
-        print(f"截图：{overview_path}")
+        try:
+            trade_path = save_trade_details(page, result_dir)
+            positions_path = save_daily_positions(page, result_dir)
+        except RuntimeError as exc:
+            print(exc)
+            print("按 Enter 关闭浏览器...")
+            input()
+            safe_close_context(context)
+            sys.exit(1)
+
+        print(f"\n策略回测流程已完成（{strategy_name} + 运行回测 + 结果保存）")
+        print(f"收益概述截图：{overview_path}")
+        print(f"交易详情 Excel：{trade_path}")
+        print(f"每日持仓 Excel：{positions_path}")
         print(f"结果目录：{result_dir}")
         print("\n浏览器保持打开。按 Enter 关闭...")
         input()

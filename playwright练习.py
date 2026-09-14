@@ -2,9 +2,9 @@
 """
 Playwright + Microsoft Edge 聚宽平台自动化练习（feature/backtest：策略回测）
 
-流程：登录 → 策略回测 → 打开策略 → 设置参数 → 运行回测 → 收益概述截图 → 交易详情/每日持仓/性能分析 Excel
+流程：登录 → 策略回测 → 打开策略 → 设置参数 → 运行回测 → 收益概述截图 → 交易详情/每日持仓/性能分析 Excel → run_manifest.json
 
-回测参数在 backtest_config.py 中修改。
+回测参数在 backtest_config.py 中修改；达标目标见 autoresearch/config.py 或 .env。
 """
 
 import os
@@ -18,6 +18,7 @@ from pathlib import Path
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, sync_playwright
 
+from autoresearch.manifest import finalize_manifest_from_result_dir, write_run_manifest
 from backtest_config import (
     BACKTEST_END_DATE,
     BACKTEST_FREQUENCY,
@@ -954,11 +955,40 @@ def run() -> None:
             safe_close_context(context)
             sys.exit(1)
 
+        manifest = finalize_manifest_from_result_dir(
+            result_dir,
+            strategy=strategy_name,
+            backtest={
+                "start": backtest_params.start_date,
+                "end": backtest_params.end_date,
+                "initial_capital": backtest_params.initial_capital,
+                "frequency": backtest_params.frequency,
+            },
+            paths={
+                "overview_png": overview_path,
+                "trade_details_xlsx": trade_path,
+                "daily_positions_xlsx": positions_path,
+                "performance_metrics_xlsx": performance_path,
+            },
+        )
+        manifest_path = write_run_manifest(result_dir, manifest)
+
         print(f"\n策略回测流程已完成（{strategy_name} + 运行回测 + 结果保存）")
         print(f"收益概述截图：{overview_path}")
         print(f"交易详情 Excel：{trade_path}")
         print(f"每日持仓 Excel：{positions_path}")
         print(f"性能分析 Excel：{performance_path}")
+        print(f"实验清单：{manifest_path}")
+        ev = manifest.get("evaluation") or {}
+        metrics = manifest.get("metrics") or {}
+        print(
+            f"指标摘要：策略收益≈{metrics.get('annual_return_pct')}% "
+            f"最大回撤≈{metrics.get('max_drawdown_pct')}%"
+        )
+        if ev.get("passed"):
+            print("目标评估：达标")
+        else:
+            print(f"目标评估：未达标（gaps={ev.get('gaps')}）")
         print(f"结果目录：{result_dir}")
         print("\n浏览器保持打开。按 Enter 关闭...")
         input()

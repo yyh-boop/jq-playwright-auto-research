@@ -7,6 +7,9 @@ screenshots/
 # 回测结果（截图、Excel 等）
 result/
 
+# 本地策略搜索配置（从 strategy_params.example.json 复制）
+strategy_params.json
+
 # 账号密码（切勿提交）
 .env
 

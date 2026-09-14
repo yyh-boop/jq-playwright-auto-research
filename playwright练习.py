@@ -12,6 +12,7 @@ import random
 import re
 import sys
 from dataclasses import dataclass
+from typing import Any
 from datetime import datetime
 from pathlib import Path
 
@@ -873,6 +874,113 @@ def safe_close_context(context) -> None:
         context.close()
     except PlaywrightError:
         pass
+
+
+@dataclass
+class BacktestRunResult:
+    result_dir: Path
+    manifest: dict
+    editor_url: str
+
+
+def apply_strategy_params_to_editor(
+    page: Page,
+    editor_url: str,
+    sp_config: dict[str, Any],
+    params: dict[str, int | float],
+) -> None:
+    """将可调参数写入聚宽编辑器（需策略内含 AUTORESEARCH 标记块）。"""
+    from autoresearch.editor import (
+        ensure_on_editor,
+        read_strategy_code,
+        save_and_compile_strategy,
+        write_strategy_code,
+    )
+    from autoresearch.strategy_params import patch_strategy_source, validate_params_in_search_space
+
+    validate_params_in_search_space(params, sp_config)
+    ensure_on_editor(page, editor_url)
+    code = read_strategy_code(page)
+    patched = patch_strategy_source(code, params, sp_config)
+    write_strategy_code(page, patched)
+    save_and_compile_strategy(page)
+    print(f"  已写入策略参数：{params}")
+
+
+def run_backtest_trial(
+    page: Page,
+    strategy_name: str,
+    backtest_params: BacktestParams,
+    editor_url: str,
+    *,
+    strategy_params: dict[str, int | float] | None = None,
+    sp_config: dict[str, Any] | None = None,
+    trial_meta: dict[str, Any] | None = None,
+    configure_backtest: bool = False,
+) -> BacktestRunResult | None:
+    """
+    在已登录且位于策略编辑器的前提下，执行一轮回测并生成 manifest。
+    configure_backtest=True 时设置回测区间/资金/频度（阶段 2 仅首轮一次）。
+    """
+    if strategy_params and sp_config:
+        apply_strategy_params_to_editor(page, editor_url, sp_config, strategy_params)
+    else:
+        from autoresearch.editor import ensure_on_editor
+
+        ensure_on_editor(page, editor_url)
+
+    if configure_backtest:
+        if not configure_backtest_params(page, backtest_params):
+            print("回测参数设置失败")
+            return None
+
+    result_dir = create_result_dir()
+    print(f"\n本次结果目录：{result_dir}")
+
+    if not run_backtest(page):
+        print("未能点击运行回测")
+        return None
+    if not wait_for_backtest_complete(page):
+        print("回测未在预期时间内完成")
+        return None
+
+    overview_path = screenshot_overview(page, result_dir)
+    try:
+        trade_path = save_trade_details(page, result_dir)
+        positions_path = save_daily_positions(page, result_dir)
+        performance_path = save_performance_metrics(page, result_dir)
+    except RuntimeError as exc:
+        print(exc)
+        return None
+
+    manifest = finalize_manifest_from_result_dir(
+        result_dir,
+        strategy=strategy_name,
+        backtest={
+            "start": backtest_params.start_date,
+            "end": backtest_params.end_date,
+            "initial_capital": backtest_params.initial_capital,
+            "frequency": backtest_params.frequency,
+        },
+        paths={
+            "overview_png": overview_path,
+            "trade_details_xlsx": trade_path,
+            "daily_positions_xlsx": positions_path,
+            "performance_metrics_xlsx": performance_path,
+        },
+        strategy_params=strategy_params,
+        trial_meta=trial_meta,
+    )
+    write_run_manifest(result_dir, manifest)
+
+    ev = manifest.get("evaluation") or {}
+    metrics = manifest.get("metrics") or {}
+    print(
+        f"  指标：策略收益≈{metrics.get('annual_return_pct')}% "
+        f"最大回撤≈{metrics.get('max_drawdown_pct')}% "
+        f"passed={ev.get('passed')}"
+    )
+    return BacktestRunResult(result_dir=result_dir, manifest=manifest, editor_url=editor_url)
 
 
 def run() -> None:

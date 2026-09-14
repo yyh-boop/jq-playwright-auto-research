@@ -29,6 +29,15 @@ SHEET_ALPHA = "阿尔法"
 PCT_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
+def _ratio_to_percent(value: float | None) -> float | None:
+    """聚宽部分指标为小数（0.0705 表示 7.05%），统一为百分数便于与 goal 比较。"""
+    if value is None:
+        return None
+    if abs(value) <= 1.5:
+        return round(value * 100, 4)
+    return value
+
+
 def _parse_percent(value: Any) -> float | None:
     if value is None:
         return None
@@ -136,7 +145,7 @@ def parse_performance_metrics(xlsx_path: Path | str) -> dict[str, Any]:
         if SHEET_STRATEGY_RETURN in wb.sheetnames:
             sr = _extract_period_metrics(wb[SHEET_STRATEGY_RETURN])
             metrics["raw"][SHEET_STRATEGY_RETURN] = sr
-            metrics["annual_return_pct"] = sr.get("primary_value")
+            metrics["annual_return_pct"] = _ratio_to_percent(sr.get("primary_value"))
 
         if SHEET_MAX_DRAWDOWN in wb.sheetnames:
             dd = _extract_period_metrics(wb[SHEET_MAX_DRAWDOWN])
@@ -145,7 +154,7 @@ def parse_performance_metrics(xlsx_path: Path | str) -> dict[str, Any]:
             if dd_val is None:
                 pv = dd.get("primary_value")
                 dd_val = abs(pv) if pv is not None else None
-            metrics["max_drawdown_pct"] = dd_val
+            metrics["max_drawdown_pct"] = _ratio_to_percent(dd_val)
 
         if SHEET_SHARPE in wb.sheetnames:
             sh = _extract_period_metrics(wb[SHEET_SHARPE])

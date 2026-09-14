@@ -49,6 +49,8 @@ def build_run_manifest(
     }
     if extra:
         manifest["extra"] = extra
+    if extra and extra.get("strategy_params") is not None:
+        manifest["strategy_params"] = extra["strategy_params"]
     return manifest
 
 
@@ -59,6 +61,8 @@ def finalize_manifest_from_result_dir(
     backtest: dict[str, Any],
     paths: dict[str, Path | str | None] | None = None,
     goal: ResearchGoal | None = None,
+    strategy_params: dict[str, Any] | None = None,
+    trial_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     从 result 目录读取 performance_metrics.xlsx，生成完整 manifest。
@@ -88,6 +92,12 @@ def finalize_manifest_from_result_dir(
     metrics = parse_performance_metrics(perf) if perf.is_file() else {}
     evaluation = evaluate_goal(metrics, goal) if metrics else {}
 
+    extra: dict[str, Any] = {}
+    if strategy_params is not None:
+        extra["strategy_params"] = strategy_params
+    if trial_meta is not None:
+        extra["trial_meta"] = trial_meta
+
     return build_run_manifest(
         run_id=run_id,
         strategy=strategy,
@@ -96,6 +106,7 @@ def finalize_manifest_from_result_dir(
         metrics=metrics,
         goal=goal,
         evaluation=evaluation,
+        extra=extra or None,
     )
 
 

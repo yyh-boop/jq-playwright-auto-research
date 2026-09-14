@@ -1,0 +1,13 @@
+{
+  "_comment": "复制为项目根目录 strategy_params.json，并与聚宽策略中 AUTORESEARCH 标记块保持一致",
+  "marker_start": "# === AUTORESEARCH_TUNABLES ===",
+  "marker_end": "# === END AUTORESEARCH_TUNABLES ===",
+  "params": {
+    "MAX_HOLD": 5,
+    "STOCK_NUM": 10
+  },
+  "search_space": {
+    "MAX_HOLD": { "min": 3, "max": 8, "step": 1 },
+    "STOCK_NUM": { "min": 5, "max": 20, "step": 5 }
+  }
+}

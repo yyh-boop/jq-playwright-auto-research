@@ -1,0 +1,19 @@
+{
+  "_comment": "ETF动量策略：复制为 strategy_params.json，并与 strategies/ETF动量.py 及聚宽「自动化测试用」标记块一致",
+  "marker_start": "# === AUTORESEARCH_TUNABLES ===",
+  "marker_end": "# === END AUTORESEARCH_TUNABLES ===",
+  "params": {
+    "HISTORY_DAYS": 130,
+    "MA_PERIOD": 120,
+    "MOM_SHORT": 20,
+    "MOM_MID": 45,
+    "MOM_MID_WEIGHT": 1.5
+  },
+  "search_space": {
+    "HISTORY_DAYS": { "min": 120, "max": 150, "step": 10 },
+    "MA_PERIOD": { "min": 100, "max": 120, "step": 10 },
+    "MOM_SHORT": { "min": 15, "max": 25, "step": 5 },
+    "MOM_MID": { "min": 40, "max": 50, "step": 5 },
+    "MOM_MID_WEIGHT": { "min": 1.0, "max": 2.0, "step": 0.25 }
+  }
+}

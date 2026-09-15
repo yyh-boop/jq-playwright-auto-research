@@ -7,6 +7,9 @@ screenshots/
 # 回测结果（截图、Excel 等）
 result/
 
+# 阶段 3 会话快照（含当次 GUI 输入目标）
+experiments/sessions/
+
 # 本地策略搜索配置（从 strategy_params.example.json 复制）
 strategy_params.json
 

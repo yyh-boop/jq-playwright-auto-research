@@ -11,6 +11,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
 import playwright练习 as jq
+from autoresearch.agent_task import emit_agent_task
 from autoresearch.goal_prompt import parse_goal_text
 from autoresearch.research_config import AgentResearchConfig
 from autoresearch.research_log import append_research_run
@@ -134,8 +135,19 @@ def run_single_upload_backtest(
             }
         )
 
+        task_paths = emit_agent_task(outcome.result_dir, session=session)
+        append_research_run(
+            {
+                "event": "agent_task_written",
+                "session_id": session.session_id if session else None,
+                "run_id": manifest.get("run_id"),
+                "agent_task_md": str(task_paths.markdown),
+            }
+        )
+
         print(f"\n完成。结果目录：{outcome.result_dir}")
         print(f"manifest：{outcome.result_dir / 'run_manifest.json'}")
+        print(f"Agent 任务：{task_paths.markdown}")
         print("\n浏览器保持打开。按 Enter 关闭...")
         input()
         jq.safe_close_context(context)

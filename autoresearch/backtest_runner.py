@@ -40,7 +40,7 @@ def run_single_upload_backtest(
         return 1
 
     trial_meta: dict[str, Any] = {
-        "phase": "3.1",
+        "phase": "3.2" if session else "3.1",
         "action": "upload_and_backtest",
     }
     if session:

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-阶段 3.0：仅初始化 session（不跑回测）。一键流程请用 research_start.py。
+阶段 3.2 一键启动：GUI 输入目标 → session → 上传本地策略 → 单次回测。
 
 用法：
-  python research_bootstrap.py
+  python research_start.py
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sys
 
+from autoresearch.backtest_runner import run_single_upload_backtest
 from autoresearch.goal_prompt import parse_goal_text
 from autoresearch.session_init import prepare_research_session
 
@@ -29,7 +30,7 @@ def main() -> int:
     session = init.session
     hints = parse_goal_text(session.goal_text)
 
-    print("阶段 3.0 初始化完成")
+    print("阶段 3.2 会话已创建，开始上传并回测…")
     print(f"  聚宽策略：{init.config.joinquant_strategy_name}")
     print(f"  本地主文件：{init.config.strategy_file}")
     print(f"  原始备份：{init.original_backup}")
@@ -40,13 +41,15 @@ def main() -> int:
             f"  解析到的数值提示：年化≥{hints.annual_return_min}% "
             f"回撤≤{hints.max_drawdown_max}%"
         )
-    else:
-        print("  （未从目标中解析到数值；停止将依赖 manifest 默认 goal 或后续 Agent 轮次上限）")
-    print("\n会话内容预览：")
-    print(json.dumps(session.to_dict(), ensure_ascii=False, indent=2))
-    print(f"\n仅回测（阶段 3.1）：\n  python research_run.py --session \"{init.session_path}\"")
-    print("\n一键（阶段 3.2）：\n  python research_start.py")
-    return 0
+
+    code = run_single_upload_backtest(
+        init.config.strategy_file,
+        session=session,
+    )
+    if code == 0:
+        print("\n阶段 3.2 完成。会话摘要：")
+        print(json.dumps(session.to_dict(), ensure_ascii=False, indent=2))
+    return code
 
 
 if __name__ == "__main__":

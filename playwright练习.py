@@ -43,6 +43,11 @@ STEP_DELAY_MIN = 3
 STEP_DELAY_MAX = 8
 BACKTEST_TIMEOUT = 300
 
+# 阶段 3.2：False = 不截图、不导出 Excel（加快 research；改 True 可恢复完整落盘）
+SAVE_BACKTEST_ARTIFACTS = False
+# 阶段 3.2：False = 不在聚宽面板改回测区间/资金/频度（用页面上已有设置）
+CONFIGURE_BACKTEST_PANEL = False
+
 TRANSACTION_COLUMNS = [
     ("date", "日期"),
     ("time", "委托时间"),
@@ -487,6 +492,14 @@ def dismiss_edit_prompt_if_present(page: Page) -> None:
     step_delay(page, "弹窗处理结束")
 
 
+def maybe_configure_backtest_panel(page: Page, params: BacktestParams) -> bool:
+    """CONFIGURE_BACKTEST_PANEL=False 时不改聚宽回测面板。"""
+    if not CONFIGURE_BACKTEST_PANEL:
+        print("\n  （已跳过设置回测区间/资金/频度，使用聚宽当前面板上的值）")
+        return True
+    return configure_backtest_params(page, params)
+
+
 def configure_backtest_params(page: Page, params: BacktestParams) -> bool:
     """在编辑器顶栏设置回测区间、初始资金、回测频度。"""
     print("\n【步骤 6】设置回测参数...")
@@ -907,6 +920,28 @@ def apply_strategy_params_to_editor(
     print(f"  已写入策略参数：{params}")
 
 
+def collect_backtest_artifacts(page: Page, result_dir: Path) -> dict[str, Path | None]:
+    """回测完成后导出截图与 Excel；SAVE_BACKTEST_ARTIFACTS=False 时全部跳过。"""
+    if not SAVE_BACKTEST_ARTIFACTS:
+        print("\n  （已跳过收益概述截图与 Excel 导出，仅写 manifest 骨架）")
+        return {
+            "overview_png": None,
+            "trade_details_xlsx": None,
+            "daily_positions_xlsx": None,
+            "performance_metrics_xlsx": None,
+        }
+    overview_path = screenshot_overview(page, result_dir)
+    trade_path = save_trade_details(page, result_dir)
+    positions_path = save_daily_positions(page, result_dir)
+    performance_path = save_performance_metrics(page, result_dir)
+    return {
+        "overview_png": overview_path,
+        "trade_details_xlsx": trade_path,
+        "daily_positions_xlsx": positions_path,
+        "performance_metrics_xlsx": performance_path,
+    }
+
+
 def run_backtest_trial(
     page: Page,
     strategy_name: str,
@@ -930,7 +965,7 @@ def run_backtest_trial(
         ensure_on_editor(page, editor_url)
 
     if configure_backtest:
-        if not configure_backtest_params(page, backtest_params):
+        if not maybe_configure_backtest_panel(page, backtest_params):
             print("回测参数设置失败")
             return None
 
@@ -944,11 +979,8 @@ def run_backtest_trial(
         print("回测未在预期时间内完成")
         return None
 
-    overview_path = screenshot_overview(page, result_dir)
     try:
-        trade_path = save_trade_details(page, result_dir)
-        positions_path = save_daily_positions(page, result_dir)
-        performance_path = save_performance_metrics(page, result_dir)
+        artifact_paths = collect_backtest_artifacts(page, result_dir)
     except RuntimeError as exc:
         print(exc)
         return None
@@ -962,12 +994,7 @@ def run_backtest_trial(
             "initial_capital": backtest_params.initial_capital,
             "frequency": backtest_params.frequency,
         },
-        paths={
-            "overview_png": overview_path,
-            "trade_details_xlsx": trade_path,
-            "daily_positions_xlsx": positions_path,
-            "performance_metrics_xlsx": performance_path,
-        },
+        paths=artifact_paths,
         strategy_params=strategy_params,
         trial_meta=trial_meta,
     )
@@ -1053,7 +1080,7 @@ def run() -> None:
         dismiss_edit_prompt_if_present(page)
 
         backtest_params = get_backtest_params()
-        if not configure_backtest_params(page, backtest_params):
+        if not maybe_configure_backtest_panel(page, backtest_params):
             print("回测参数设置失败")
             print("按 Enter 关闭浏览器...")
             input()
@@ -1077,12 +1104,8 @@ def run() -> None:
             safe_close_context(context)
             sys.exit(1)
 
-        overview_path = screenshot_overview(page, result_dir)
-
         try:
-            trade_path = save_trade_details(page, result_dir)
-            positions_path = save_daily_positions(page, result_dir)
-            performance_path = save_performance_metrics(page, result_dir)
+            artifact_paths = collect_backtest_artifacts(page, result_dir)
         except RuntimeError as exc:
             print(exc)
             print("按 Enter 关闭浏览器...")
@@ -1099,20 +1122,16 @@ def run() -> None:
                 "initial_capital": backtest_params.initial_capital,
                 "frequency": backtest_params.frequency,
             },
-            paths={
-                "overview_png": overview_path,
-                "trade_details_xlsx": trade_path,
-                "daily_positions_xlsx": positions_path,
-                "performance_metrics_xlsx": performance_path,
-            },
+            paths=artifact_paths,
         )
         manifest_path = write_run_manifest(result_dir, manifest)
 
-        print(f"\n策略回测流程已完成（{strategy_name} + 运行回测 + 结果保存）")
-        print(f"收益概述截图：{overview_path}")
-        print(f"交易详情 Excel：{trade_path}")
-        print(f"每日持仓 Excel：{positions_path}")
-        print(f"性能分析 Excel：{performance_path}")
+        print(f"\n策略回测流程已完成（{strategy_name} + 运行回测）")
+        if SAVE_BACKTEST_ARTIFACTS:
+            print(f"收益概述截图：{artifact_paths.get('overview_png')}")
+            print(f"交易详情 Excel：{artifact_paths.get('trade_details_xlsx')}")
+            print(f"每日持仓 Excel：{artifact_paths.get('daily_positions_xlsx')}")
+            print(f"性能分析 Excel：{artifact_paths.get('performance_metrics_xlsx')}")
         print(f"实验清单：{manifest_path}")
         ev = manifest.get("evaluation") or {}
         metrics = manifest.get("metrics") or {}

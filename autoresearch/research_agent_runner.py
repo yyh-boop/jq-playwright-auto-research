@@ -199,6 +199,16 @@ def run_research_agent(
     )
 
 
+def pick_next_strategy_path(outcome: ResearchAgentOutcome) -> Path:
+    if outcome.parsed_new_file is not None and outcome.parsed_new_file.is_file():
+        return outcome.parsed_new_file.resolve()
+    if outcome.new_strategy_files:
+        return outcome.new_strategy_files[-1].resolve()
+    raise RuntimeError(
+        "Agent 未在 strategies/ 下产生新的 .py 文件（或未输出 NEW_STRATEGY_FILE 行），循环终止"
+    )
+
+
 def resolve_agent_task_path(*, result_dir: Path | None, task_json: Path | None) -> Path:
     if task_json is not None:
         p = task_json if task_json.is_absolute() else BASE_DIR / task_json

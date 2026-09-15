@@ -44,9 +44,9 @@ STEP_DELAY_MAX = 8
 BACKTEST_TIMEOUT = 300
 
 # 阶段 3.2：False = 不截图、不导出 Excel（加快 research；改 True 可恢复完整落盘）
-SAVE_BACKTEST_ARTIFACTS = False
+SAVE_BACKTEST_ARTIFACTS = True
 # 阶段 3.2：False = 不在聚宽面板改回测区间/资金/频度（用页面上已有设置）
-CONFIGURE_BACKTEST_PANEL = False
+CONFIGURE_BACKTEST_PANEL = True
 
 TRANSACTION_COLUMNS = [
     ("date", "日期"),

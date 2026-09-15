@@ -19,6 +19,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
 
+# 从 test_apikey/ 运行时，需把项目根加入 path 才能 import autoresearch
+_ROOT = str(PROJECT_ROOT)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 
 def load_dotenv() -> None:
     if not ENV_FILE.is_file():
@@ -119,9 +124,14 @@ def main() -> int:
     try:
         apply_win_sdk_shim()
         import cursor_sdk  # noqa: F401
-    except ImportError:
+    except ImportError as exc:
+        if "autoresearch" in str(exc):
+            print(f"导入失败：{exc}", file=sys.stderr)
+            print("请在 playwright练习 目录下运行本脚本。", file=sys.stderr)
+            return 1
         print("未安装 cursor-sdk。请对【上面这一行同一个 Python】执行：", file=sys.stderr)
         print(f'  "{sys.executable}" -m pip install cursor-sdk', file=sys.stderr)
+        print(f"（原始错误：{exc}）", file=sys.stderr)
         return 1
 
     print(f"项目根目录：{PROJECT_ROOT}")

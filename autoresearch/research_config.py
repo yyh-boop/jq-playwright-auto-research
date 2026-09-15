@@ -52,7 +52,7 @@ class AgentResearchConfig:
         return cls(
             joinquant_strategy_name=name,
             strategy_file=strategy_file,
-            max_agent_rounds=_int_env("AUTORESEARCH_MAX_AGENT_ROUNDS", 10),
+            max_agent_rounds=_int_env("AUTORESEARCH_MAX_AGENT_ROUNDS", 5),
             agent_retries=_int_env("AUTORESEARCH_AGENT_RETRIES", 2),
         )
 

@@ -20,6 +20,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, sync_playwright
 
 from autoresearch.manifest import finalize_manifest_from_result_dir, write_run_manifest
+from autoresearch.result_dirs import allocate_result_dir, strategy_label_from_trial_meta
 from backtest_config import (
     BACKTEST_END_DATE,
     BACKTEST_FREQUENCY,
@@ -552,12 +553,19 @@ def configure_backtest_params(page: Page, params: BacktestParams) -> bool:
     return True
 
 
-def create_result_dir() -> Path:
-    """为本次回测创建带时间戳的结果目录。"""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_dir = RESULT_DIR / ts
-    result_dir.mkdir(parents=True, exist_ok=True)
-    return result_dir
+def create_result_dir(
+    *,
+    strategy_label: str | None = None,
+    trial_meta: dict[str, Any] | None = None,
+    joinquant_strategy_name: str | None = None,
+) -> Path:
+    """为本次回测创建结果目录，默认以本地策略文件名（stem）命名。"""
+    if strategy_label is None:
+        if joinquant_strategy_name is not None:
+            strategy_label = strategy_label_from_trial_meta(joinquant_strategy_name, trial_meta)
+        else:
+            strategy_label = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return allocate_result_dir(RESULT_DIR, strategy_label)
 
 
 def run_backtest(page: Page) -> bool:
@@ -969,7 +977,10 @@ def run_backtest_trial(
             print("回测参数设置失败")
             return None
 
-    result_dir = create_result_dir()
+    result_dir = create_result_dir(
+        trial_meta=trial_meta,
+        joinquant_strategy_name=strategy_name,
+    )
     print(f"\n本次结果目录：{result_dir}")
 
     if not run_backtest(page):
@@ -1087,7 +1098,7 @@ def run() -> None:
             safe_close_context(context)
             sys.exit(1)
 
-        result_dir = create_result_dir()
+        result_dir = create_result_dir(joinquant_strategy_name=strategy_name)
         print(f"\n本次结果目录：{result_dir}")
 
         if not run_backtest(page):

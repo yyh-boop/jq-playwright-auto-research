@@ -209,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     import sys
 
     parser = argparse.ArgumentParser(description="阶段 3.3：从 result 目录生成 agent_task.md")
-    parser.add_argument("result_dir", type=Path, help="如 result/20260915_133955")
+    parser.add_argument("result_dir", type=Path, help="如 result/ETF动量 或 result/ETF动量_收紧回撤")
     parser.add_argument(
         "--session",
         type=Path,

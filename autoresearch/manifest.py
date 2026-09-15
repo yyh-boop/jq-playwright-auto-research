@@ -66,7 +66,7 @@ def finalize_manifest_from_result_dir(
 ) -> dict[str, Any]:
     """
     从 result 目录读取 performance_metrics.xlsx，生成完整 manifest。
-    run_id 默认取目录名（时间戳）。
+    run_id 默认取结果目录名（通常为本地策略文件名 stem）。
     """
     d = Path(result_dir)
     run_id = d.name

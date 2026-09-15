@@ -148,6 +148,7 @@ def run_single_upload_backtest(
         print(f"\n完成。结果目录：{outcome.result_dir}")
         print(f"manifest：{outcome.result_dir / 'run_manifest.json'}")
         print(f"Agent 任务：{task_paths.markdown}")
+        print(f"阶段 3.4：python research_agent.py --result \"{outcome.result_dir.name}\"")
         print("\n浏览器保持打开。按 Enter 关闭...")
         input()
         jq.safe_close_context(context)

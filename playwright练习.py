@@ -983,6 +983,33 @@ def run_backtest_trial(
     return BacktestRunResult(result_dir=result_dir, manifest=manifest, editor_url=editor_url)
 
 
+def run_backtest_from_local_file(
+    page: Page,
+    strategy_name: str,
+    backtest_params: BacktestParams,
+    editor_url: str,
+    strategy_path: Path,
+    *,
+    trial_meta: dict[str, Any] | None = None,
+    configure_backtest: bool = True,
+) -> BacktestRunResult | None:
+    """阶段 3：将本地策略整文件写入聚宽编辑器后回测。"""
+    from autoresearch.editor import apply_strategy_from_file
+
+    meta = {"local_strategy_file": str(strategy_path.resolve())}
+    if trial_meta:
+        meta = {**trial_meta, **meta}
+    apply_strategy_from_file(page, editor_url, strategy_path)
+    return run_backtest_trial(
+        page,
+        strategy_name,
+        backtest_params,
+        editor_url,
+        trial_meta=meta,
+        configure_backtest=configure_backtest,
+    )
+
+
 def run() -> None:
     username, password = get_credentials()
     SCREENSHOTS_DIR.mkdir(exist_ok=True)

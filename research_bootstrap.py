@@ -78,6 +78,7 @@ def main() -> int:
         print("  （未从目标中解析到数值；停止将依赖 manifest 默认 goal 或后续 Agent 轮次上限）")
     print("\n会话内容预览：")
     print(json.dumps(session.to_dict(), ensure_ascii=False, indent=2))
+    print(f"\n下一步（阶段 3.1 回测）：\n  python research_run.py --session \"{session_path}\"")
     return 0
 
 

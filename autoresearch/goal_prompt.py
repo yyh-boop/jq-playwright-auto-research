@@ -22,7 +22,7 @@ class ParsedGoalHints:
 
 
 _RE_ANNUAL = re.compile(
-    r"(?:年化|策略收益|收益)[^0-9]{0,12}(?:≥|>=|大于|不低于|至少|达到)?\s*(\d+(?:\.\d+)?)\s*%?",
+    r"(?:年化|年华|策略收益|收益)[^0-9]{0,12}(?:≥|>=|大于|不低于|至少|达到)?\s*(\d+(?:\.\d+)?)\s*%?",
     re.IGNORECASE,
 )
 _RE_DRAWDOWN = re.compile(

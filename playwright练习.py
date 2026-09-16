@@ -380,12 +380,80 @@ def ensure_logged_in(page: Page, username: str, password: str) -> bool:
     return is_logged_in(page)
 
 
+def wait_for_strategy_list_page(page: Page, *, timeout_ms: int = 45000) -> bool:
+    """
+    等待策略列表页就绪。聚宽 UI 不一定有可见文案「策略列表」，故用 URL + 多种元素判断。
+    """
+    if is_login_page(page):
+        print("  当前为登录页，无法进入策略列表（Cookie 可能已失效）")
+        page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_strategy_list_login.png"))
+        return False
+
+    try:
+        page.wait_for_url("**/algorithm/index/list**", timeout=min(timeout_ms, 20000))
+    except PlaywrightError:
+        if "/algorithm/index/list" not in page.url:
+            print(f"  URL 未进入策略列表：{page.url}")
+
+    ready_selectors = (
+        "text=策略列表",
+        "text=我的策略",
+        "text=创建策略",
+        "a[href*='/algorithm/index/edit']",
+        "table tbody tr",
+        "#main_strategies",
+        ".strategy-list",
+    )
+    deadline = page.evaluate("() => Date.now()") + timeout_ms
+    matched = ""
+    while page.evaluate("() => Date.now()") < deadline:
+        if is_login_page(page):
+            print("  打开策略列表时被重定向到登录页")
+            page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_strategy_list_login.png"))
+            return False
+        if "/algorithm/index/list" in page.url:
+            for sel in ready_selectors:
+                loc = page.locator(sel).first
+                try:
+                    if not loc.count():
+                        continue
+                    loc.wait_for(state="visible", timeout=800)
+                    matched = sel
+                    break
+                except PlaywrightError:
+                    continue
+            if matched:
+                break
+            # 已在 list URL，给 jqGrid 等异步渲染留时间
+            try:
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except PlaywrightError:
+                pass
+            if page.locator("a[href*='/algorithm/index/edit']").count():
+                matched = "a[href*='/algorithm/index/edit']"
+                break
+        page.wait_for_timeout(400)
+
+    ok = "/algorithm/index/list" in page.url and bool(matched)
+    if not ok:
+        print(f"  策略列表页未就绪（url={page.url}）")
+        page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_strategy_list_failed.png"))
+        return False
+    print(f"  策略列表已就绪（{matched}）")
+    return True
+
+
 def go_to_strategy_backtest(page: Page) -> bool:
     """顶栏「量化研究平台」→「策略回测」，失败则直接跳转策略列表。"""
     print("\n【步骤 3】打开策略回测...")
-    if "/view/user/floor" not in page.url:
+    if "/view/user/floor" not in page.url and "/algorithm/index/list" not in page.url:
         page.goto(JOINQUANT_HOME_URL, wait_until="domcontentloaded", timeout=30000)
         step_delay(page, "进入首页")
+
+    if "/algorithm/index/list" in page.url and wait_for_strategy_list_page(page):
+        print("策略列表页：", page.url)
+        page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_strategy_list.png"))
+        return True
 
     nav = page.locator("a").filter(has_text="量化研究平台").first
     backtest_href = "/algorithm/index/list"
@@ -409,10 +477,12 @@ def go_to_strategy_backtest(page: Page) -> bool:
     if not clicked:
         if not nav.count() or not nav.is_visible():
             print("未找到顶栏导航，改为直接访问策略列表")
-        page.goto(JOINQUANT_STRATEGY_LIST_URL, wait_until="domcontentloaded", timeout=30000)
+        page.goto(JOINQUANT_STRATEGY_LIST_URL, wait_until="load", timeout=60000)
         step_delay(page, "进入策略列表")
 
-    page.wait_for_selector("text=策略列表", timeout=15000)
+    if not wait_for_strategy_list_page(page):
+        return False
+
     print("策略列表页：", page.url)
     page.screenshot(path=str(SCREENSHOTS_DIR / "backtest_strategy_list.png"))
     return "/algorithm/index/list" in page.url
@@ -421,7 +491,8 @@ def go_to_strategy_backtest(page: Page) -> bool:
 def open_existing_strategy(page: Page, strategy_name: str) -> bool:
     """在策略列表中打开已有策略，进入编辑器。"""
     print(f"\n【步骤 4】打开策略「{strategy_name}」...")
-    page.wait_for_selector("text=策略列表", timeout=15000)
+    if not wait_for_strategy_list_page(page):
+        return False
 
     strategy_link = page.locator("a[href*='/algorithm/index/edit']").filter(has_text=strategy_name)
     if not strategy_link.count():
@@ -607,6 +678,78 @@ def wait_for_backtest_complete(page: Page) -> bool:
     step_delay(page, "回测完成")
     print("回测详情页：", page.url)
     return True
+
+
+SCRAPE_OVERVIEW_METRICS_JS = """
+() => {
+  function parsePct(text) {
+    const m = String(text || '').match(/(-?\\d+(?:\\.\\d+)?)\\s*%/);
+    return m ? parseFloat(m[1]) : null;
+  }
+  /** 仅匹配元素文本恰好为 label（避免「超额收益最大回撤」误命中「最大回撤」） */
+  function metricByExactLabel(label) {
+    const nodes = document.querySelectorAll(
+      'span, div, p, li, td, th, label, b, strong, em'
+    );
+    for (const el of nodes) {
+      const t = (el.textContent || '').trim();
+      if (t !== label) continue;
+      const parent =
+        el.closest('li, .col-md-2, .col-xs-2, .col-sm-2, .col-lg-2, [class*="indicator"]') ||
+        el.parentElement;
+      if (!parent) continue;
+      const block = parent.innerText || '';
+      const idx = block.indexOf(label);
+      const rest = idx >= 0 ? block.slice(idx + label.length) : block;
+      const v = parsePct(rest);
+      if (v !== null) return v;
+      const sib = el.nextElementSibling;
+      if (sib) {
+        const v2 = parsePct(sib.textContent);
+        if (v2 !== null) return v2;
+      }
+    }
+    return null;
+  }
+  return {
+    strategy_return_pct: metricByExactLabel('策略收益'),
+    strategy_annual_return_pct: metricByExactLabel('策略年化收益'),
+    max_drawdown_pct: metricByExactLabel('最大回撤'),
+  };
+}
+"""
+
+
+def scrape_overview_metrics(page: Page) -> dict[str, float | None]:
+    """从收益概述页读取与截图一致的策略收益、策略年化收益、最大回撤（%）。"""
+    ensure_overview_tab(page)
+    try:
+        page.locator("text=策略收益").first.wait_for(state="visible", timeout=20000)
+    except PlaywrightError:
+        pass
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except PlaywrightError:
+        pass
+    page.wait_for_timeout(1200)
+    raw = page.evaluate(SCRAPE_OVERVIEW_METRICS_JS)
+    if not isinstance(raw, dict):
+        return {
+            "strategy_return_pct": None,
+            "strategy_annual_return_pct": None,
+            "max_drawdown_pct": None,
+        }
+    out: dict[str, float | None] = {}
+    for key in ("strategy_return_pct", "strategy_annual_return_pct", "max_drawdown_pct"):
+        val = raw.get(key)
+        if val is None:
+            out[key] = None
+        else:
+            try:
+                out[key] = float(val)
+            except (TypeError, ValueError):
+                out[key] = None
+    return out
 
 
 def ensure_overview_tab(page: Page) -> None:
@@ -934,16 +1077,36 @@ def collect_backtest_artifacts(page: Page, result_dir: Path) -> dict[str, Path |
         print("\n  （已跳过收益概述截图与 Excel 导出，仅写 manifest 骨架）")
         return {
             "overview_png": None,
+            "overview_metrics_json": None,
             "trade_details_xlsx": None,
             "daily_positions_xlsx": None,
             "performance_metrics_xlsx": None,
         }
+    from autoresearch.overview_metrics import save_overview_metrics
+    from datetime import datetime, timezone
+
+    scraped = scrape_overview_metrics(page)
+    overview_json = save_overview_metrics(
+        result_dir,
+        {
+            "scraped_at": datetime.now(timezone.utc).isoformat(),
+            "page_url": page.url,
+            "metrics": scraped,
+        },
+    )
+    print(
+        "  收益概述指标："
+        f"策略收益={scraped.get('strategy_return_pct')}% "
+        f"策略年化={scraped.get('strategy_annual_return_pct')}% "
+        f"最大回撤={scraped.get('max_drawdown_pct')}%"
+    )
     overview_path = screenshot_overview(page, result_dir)
     trade_path = save_trade_details(page, result_dir)
     positions_path = save_daily_positions(page, result_dir)
     performance_path = save_performance_metrics(page, result_dir)
     return {
         "overview_png": overview_path,
+        "overview_metrics_json": overview_json,
         "trade_details_xlsx": trade_path,
         "daily_positions_xlsx": positions_path,
         "performance_metrics_xlsx": performance_path,
@@ -1014,7 +1177,8 @@ def run_backtest_trial(
     ev = manifest.get("evaluation") or {}
     metrics = manifest.get("metrics") or {}
     print(
-        f"  指标：策略收益≈{metrics.get('annual_return_pct')}% "
+        f"  指标（概述）：策略收益≈{metrics.get('strategy_return_pct')}% "
+        f"策略年化≈{metrics.get('strategy_annual_return_pct')}% "
         f"最大回撤≈{metrics.get('max_drawdown_pct')}% "
         f"passed={ev.get('passed')}"
     )
@@ -1147,7 +1311,8 @@ def run() -> None:
         ev = manifest.get("evaluation") or {}
         metrics = manifest.get("metrics") or {}
         print(
-            f"指标摘要：策略收益≈{metrics.get('annual_return_pct')}% "
+            f"指标摘要：策略收益≈{metrics.get('strategy_return_pct')}% "
+            f"策略年化≈{metrics.get('strategy_annual_return_pct')}% "
             f"最大回撤≈{metrics.get('max_drawdown_pct')}%"
         )
         if ev.get("passed"):

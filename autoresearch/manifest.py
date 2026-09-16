@@ -10,6 +10,12 @@ from typing import Any
 
 from autoresearch.config import ResearchGoal
 from autoresearch.evaluate_goal import evaluate_goal
+from autoresearch.overview_metrics import (
+    OVERVIEW_METRICS_FILENAME,
+    apply_xlsx_period_fallback,
+    load_overview_metrics_file,
+    merge_overview_into_metrics,
+)
 from autoresearch.parse_performance import parse_performance_metrics
 
 
@@ -90,6 +96,21 @@ def finalize_manifest_from_result_dir(
             path_map[name.replace(".", "_")] = name if p.is_file() else None
 
     metrics = parse_performance_metrics(perf) if perf.is_file() else {}
+    overview = load_overview_metrics_file(d / OVERVIEW_METRICS_FILENAME)
+    if overview:
+        metrics = merge_overview_into_metrics(metrics, overview, backtest=backtest)
+    else:
+        metrics = apply_xlsx_period_fallback(metrics, backtest)
+    # 无 overview 或 overview 未写入回撤时，保证 max_drawdown 来自 Excel
+    if metrics.get("max_drawdown_pct") is None:
+        from autoresearch.overview_metrics import xlsx_max_drawdown_pct
+
+        dd_x = xlsx_max_drawdown_pct(metrics)
+        if dd_x is not None:
+            metrics = dict(metrics)
+            metrics["max_drawdown_pct"] = dd_x
+    # 整年回测：若仅有 Excel，补全 12 个月策略收益
+    metrics = apply_xlsx_period_fallback(metrics, backtest)
     evaluation = evaluate_goal(metrics, goal) if metrics else {}
 
     extra: dict[str, Any] = {}

@@ -95,6 +95,12 @@ def build_agent_task_payload(
     evaluation = manifest.get("evaluation") or {}
     goal_text = trial_meta.get("goal_text") or (session.goal_text if session else None)
 
+    research_memory_path: str | None = None
+    if session_path and session_path.parent.is_dir():
+        mem = session_path.parent / "research_memory.json"
+        if mem.is_file():
+            research_memory_path = _rel(mem)
+
     return {
         "schema_version": 1,
         "run_id": manifest.get("run_id"),
@@ -106,11 +112,14 @@ def build_agent_task_payload(
             "strategy_current": _rel(strategy_file) if strategy_file and strategy_file.is_file() else None,
             "strategy_original": original_file,
             "research_runs_jsonl": _rel(RESEARCH_RUNS_JSONL) if RESEARCH_RUNS_JSONL.is_file() else None,
+            "research_memory": research_memory_path,
             "artifacts": artifacts,
         },
         "goal_text": goal_text,
         "metrics_summary": {
             "has_metrics": bool(metrics),
+            "strategy_return_pct": metrics.get("strategy_return_pct"),
+            "strategy_annual_return_pct": metrics.get("strategy_annual_return_pct"),
             "annual_return_pct": metrics.get("annual_return_pct"),
             "max_drawdown_pct": metrics.get("max_drawdown_pct"),
             "passed": manifest.get("passed"),
@@ -148,6 +157,8 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- 原始备份: `{paths['strategy_original']}`")
     if paths.get("research_runs_jsonl"):
         lines.append(f"- 实验日志: `{paths['research_runs_jsonl']}`（可选，最近几条）")
+    if paths.get("research_memory"):
+        lines.append(f"- **会话记忆**: `{paths['research_memory']}`（必读）")
     lines.extend(["", "### 回测产物（若已导出）", ""])
     arts = paths.get("artifacts") or {}
     for k, v in arts.items():
@@ -159,8 +170,9 @@ def _render_markdown(payload: dict[str, Any]) -> str:
             "## 指标摘要（来自 manifest，可能为空）",
             "",
             f"- has_metrics: {ms.get('has_metrics')}",
-            f"- annual_return_pct: {ms.get('annual_return_pct')}",
-            f"- max_drawdown_pct: {ms.get('max_drawdown_pct')}",
+            f"- strategy_return_pct（策略收益）: {ms.get('strategy_return_pct')}",
+            f"- strategy_annual_return_pct（策略年化收益）: {ms.get('strategy_annual_return_pct')}",
+            f"- max_drawdown_pct（最大回撤）: {ms.get('max_drawdown_pct')}",
             f"- passed: {ms.get('passed')}",
             f"- gaps: {ms.get('gaps')}",
             "",

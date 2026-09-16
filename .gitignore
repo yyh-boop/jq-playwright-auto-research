@@ -7,6 +7,9 @@ screenshots/
 # 回测结果（截图、Excel 等）
 result/
 
+# 阶段 3.6 session 复盘报告
+report/
+
 # 阶段 3 会话快照（含当次 GUI 输入目标）
 experiments/sessions/
 

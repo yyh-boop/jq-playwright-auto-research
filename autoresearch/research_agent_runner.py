@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from autoresearch.cursor_client import run_local_agent_prompt
+from autoresearch.loop_agent_session import LoopAgentSession
+from autoresearch.research_memory import ResearchMemory, ingest_agent_response, render_memory_for_prompt
 from autoresearch.research_config import AgentResearchConfig
 from autoresearch.research_log import append_research_run
 from autoresearch.research_paths import BASE_DIR, STRATEGIES_DIR
@@ -63,6 +65,8 @@ def build_agent_prompt_from_payload(payload: dict[str, Any]) -> str:
         lines.append(f"- 原始备份: {paths.get('strategy_original')}")
     if paths.get("research_runs_jsonl"):
         lines.append(f"- 可选实验日志: {paths.get('research_runs_jsonl')}")
+    if paths.get("research_memory"):
+        lines.append(f"- **会话记忆（必读）**: {paths.get('research_memory')}")
     arts = paths.get("artifacts") or {}
     if any(arts.values()):
         lines.append("回测产物：")
@@ -73,7 +77,8 @@ def build_agent_prompt_from_payload(payload: dict[str, Any]) -> str:
         [
             "",
             f"指标摘要: has_metrics={ms.get('has_metrics')} "
-            f"annual_return_pct={ms.get('annual_return_pct')} "
+            f"strategy_return_pct={ms.get('strategy_return_pct')} "
+            f"strategy_annual_return_pct={ms.get('strategy_annual_return_pct')} "
             f"max_drawdown_pct={ms.get('max_drawdown_pct')} passed={ms.get('passed')} gaps={ms.get('gaps')}",
             "",
             payload.get("agent_instructions_if_metrics_empty", ""),
@@ -86,6 +91,32 @@ def build_agent_prompt_from_payload(payload: dict[str, Any]) -> str:
             "并简要说明改动方向与关键逻辑变更。",
         ]
     )
+    return "\n".join(lines)
+
+
+def build_followup_prompt(payload: dict[str, Any], memory: ResearchMemory) -> str:
+    paths = payload.get("paths_to_read") or {}
+    ms = payload.get("metrics_summary") or {}
+    lines = [
+        "## 新一轮回测已完成（同一会话 follow-up）",
+        "",
+        render_memory_for_prompt(memory),
+        "",
+        "---",
+        "请阅读本轮材料并**在 strategy_current 基础上**出下一版：",
+        f"- manifest: {paths.get('run_manifest')}",
+        f"- 当前策略: {paths.get('strategy_current')}",
+        f"- 会话记忆文件: {paths.get('research_memory')}",
+        "",
+        f"本轮指标摘要: strategy_return_pct={ms.get('strategy_return_pct')} "
+        f"strategy_annual_return_pct={ms.get('strategy_annual_return_pct')} "
+        f"max_drawdown_pct={ms.get('max_drawdown_pct')} passed={ms.get('passed')} gaps={ms.get('gaps')}",
+        "",
+        "## 执行",
+        "在 strategies/ 下**新建**改进版 .py；最后一行严格输出：",
+        "NEW_STRATEGY_FILE: strategies/你的文件名.py",
+        "可选：RESEARCH_INSIGHT: … ； MEMORY_UPDATE_JSON: {\"direction\":\"…\",\"verdict\":\"promising|abandoned\",\"reason\":\"…\"}",
+    ]
     return "\n".join(lines)
 
 
@@ -116,28 +147,20 @@ def _parse_new_file_line(text: str) -> Path | None:
     return p if p.is_file() else None
 
 
-def run_research_agent(
-    agent_task_path: Path,
+def _invoke_agent_with_retries(
     *,
-    max_retries: int | None = None,
-) -> ResearchAgentOutcome:
-    cfg = AgentResearchConfig.from_env()
-    retries = max_retries if max_retries is not None else cfg.agent_retries
-    task_path = agent_task_path.resolve()
-    payload = load_agent_task_payload(task_path)
-    result_dir = task_path.parent
-    prompt = build_agent_prompt_from_payload(payload)
-
-    before = _strategy_snapshot()
+    payload: dict[str, Any],
+    prompt: str,
+    retries: int,
+    send_fn,
+) -> Any:
     last_error: Exception | None = None
-    result = None
-
     for attempt in range(max(1, retries + 1)):
         try:
-            result = run_local_agent_prompt(prompt)
+            result = send_fn(prompt)
             if result.status and result.status.lower() in ("failed", "error", "cancelled"):
                 raise RuntimeError(f"Agent status={result.status}")
-            break
+            return result
         except Exception as exc:
             last_error = exc
             append_research_run(
@@ -150,8 +173,17 @@ def run_research_agent(
             )
             if attempt >= retries:
                 raise RuntimeError(f"Agent 调用失败（已重试 {retries} 次）: {exc}") from exc
+    raise RuntimeError(f"Agent 调用失败: {last_error}")
 
-    assert result is not None
+
+def _finalize_agent_outcome(
+    *,
+    task_path: Path,
+    payload: dict[str, Any],
+    result,
+    before: dict[str, float],
+) -> ResearchAgentOutcome:
+    result_dir = task_path.parent
     after = _strategy_snapshot()
     new_files = tuple(_new_files(before, after))
     parsed = _parse_new_file_line(result.text)
@@ -197,6 +229,59 @@ def run_research_agent(
         new_strategy_files=new_files,
         parsed_new_file=parsed,
     )
+
+
+def run_research_agent(
+    agent_task_path: Path,
+    *,
+    max_retries: int | None = None,
+) -> ResearchAgentOutcome:
+    cfg = AgentResearchConfig.from_env()
+    retries = max_retries if max_retries is not None else cfg.agent_retries
+    task_path = agent_task_path.resolve()
+    payload = load_agent_task_payload(task_path)
+    prompt = build_agent_prompt_from_payload(payload)
+    before = _strategy_snapshot()
+    result = _invoke_agent_with_retries(
+        payload=payload,
+        prompt=prompt,
+        retries=retries,
+        send_fn=lambda p: run_local_agent_prompt(p),
+    )
+    return _finalize_agent_outcome(task_path=task_path, payload=payload, result=result, before=before)
+
+
+def run_research_agent_turn(
+    loop_agent: LoopAgentSession,
+    agent_task_path: Path,
+    memory: ResearchMemory,
+    *,
+    agent_turn: int,
+    loop_round: int,
+    max_retries: int | None = None,
+) -> ResearchAgentOutcome:
+    """阶段 3.6：在同一会话 Agent 上 send（首轮完整 prompt，后续 follow-up）。"""
+    cfg = AgentResearchConfig.from_env()
+    retries = max_retries if max_retries is not None else cfg.agent_retries
+    task_path = agent_task_path.resolve()
+    payload = load_agent_task_payload(task_path)
+
+    if agent_turn == 0:
+        base = build_agent_prompt_from_payload(payload)
+        prompt = base + "\n\n" + render_memory_for_prompt(memory)
+    else:
+        prompt = build_followup_prompt(payload, memory)
+
+    before = _strategy_snapshot()
+    result = _invoke_agent_with_retries(
+        payload=payload,
+        prompt=prompt,
+        retries=retries,
+        send_fn=loop_agent.send,
+    )
+    ingest_agent_response(memory, result.text, loop_round=loop_round)
+    memory.save()
+    return _finalize_agent_outcome(task_path=task_path, payload=payload, result=result, before=before)
 
 
 def pick_next_strategy_path(outcome: ResearchAgentOutcome) -> Path:

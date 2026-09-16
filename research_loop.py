@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-阶段 3.5 一键 auto-research：GUI 目标 → 基线回测 → Agent 改码 → 再回测（单浏览器登录）。
+阶段 3.6 一键 auto-research：GUI 目标 → 基线回测 → Agent 同会话多轮改码 → 再回测（单浏览器登录）。
 
 用法：
   python research_loop.py
@@ -20,7 +20,7 @@ from autoresearch.research_loop_runner import print_loop_summary, run_research_l
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="阶段 3.5 research 循环")
+    parser = argparse.ArgumentParser(description="阶段 3.6 research 循环")
     parser.add_argument(
         "--max-rounds",
         type=int,

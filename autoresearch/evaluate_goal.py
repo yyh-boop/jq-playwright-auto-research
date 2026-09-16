@@ -19,7 +19,11 @@ def evaluate_goal(
     gaps：未达标时的差距说明
     """
     goal = goal or ResearchGoal.from_env()
-    annual = metrics.get("annual_return_pct")
+    annual = (
+        metrics.get("strategy_annual_return_pct")
+        or metrics.get("strategy_return_pct")
+        or metrics.get("annual_return_pct")
+    )
     drawdown = metrics.get("max_drawdown_pct")
 
     missing: list[str] = []

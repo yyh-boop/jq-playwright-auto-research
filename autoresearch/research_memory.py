@@ -22,6 +22,10 @@ _MEMORY_JSON_RE = re.compile(
     r"MEMORY_UPDATE_JSON:\s*(\{.*?\})",
     re.DOTALL | re.IGNORECASE,
 )
+_ROUND_DECISION_RE = re.compile(
+    r"^ROUND_DECISION:\s*(deepen|pivot)\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
 
 
 @dataclass
@@ -317,6 +321,13 @@ def record_backtest_round(
 
 
 def ingest_agent_response(memory: ResearchMemory, response_text: str, *, loop_round: int) -> None:
+    dm = _ROUND_DECISION_RE.search(response_text)
+    if dm:
+        decision = dm.group(1).lower()
+        note = f"ROUND_DECISION:{decision}（回测轮 {loop_round + 1} 后）"
+        if note not in memory.agent_notes:
+            memory.agent_notes.append(note)
+
     m = _INSIGHT_RE.search(response_text)
     if m:
         insight = m.group(1).strip()
@@ -348,49 +359,168 @@ def ingest_agent_response(memory: ResearchMemory, response_text: str, *, loop_ro
             memory.abandoned_directions.append(note)
 
 
-def render_memory_for_prompt(memory: ResearchMemory) -> str:
-    lines = [
-        "## 本会话实验记忆（research_memory.json，请严格遵守）",
-        f"- 研究目标：{memory.goal_text}",
-        f"- Baseline：{Path(memory.baseline_strategy).name}（勿无故退回 baseline 重开分支，除非记忆表明当前方向已放弃）",
-        "",
-        "### 各轮回测（脚本记录）",
-    ]
+def _metrics_line(metrics: dict[str, Any]) -> str:
+    sc = metrics.get("_score")
+    sc_s = f"{float(sc):.2f}" if sc is not None else "—"
+    return (
+        f"策略收益={metrics.get('strategy_return_pct')}% "
+        f"年化={metrics.get('strategy_annual_return_pct')}% "
+        f"回撤={metrics.get('max_drawdown_pct')}% "
+        f"score={sc_s}"
+    )
+
+
+def _effect_summary(r: MemoryRound) -> str:
+    tags = set(r.auto_tags or [])
+    parts: list[str] = []
+    if "drawdown_down_vs_prev" in tags or "drawdown_down_vs_baseline" in tags:
+        parts.append("回撤改善")
+    if "drawdown_up_vs_prev" in tags:
+        parts.append("回撤恶化")
+    if "return_up_vs_prev" in tags or "return_up_vs_baseline" in tags:
+        parts.append("收益提升")
+    if "return_down_vs_prev" in tags:
+        parts.append("收益下降")
+    if "meets_return_goal" in tags:
+        parts.append("达收益目标")
+    if "meets_drawdown_goal" in tags:
+        parts.append("达回撤目标")
+    if not parts:
+        parts.append("变化不大")
+    return "；".join(parts)
+
+
+def best_round(memory: ResearchMemory) -> MemoryRound | None:
     if not memory.rounds:
-        lines.append("（尚无回测记录）")
-    for r in memory.rounds:
+        return None
+    return max(memory.rounds, key=lambda r: r.score)
+
+
+def suggest_next_action(memory: ResearchMemory) -> tuple[str, str]:
+    """
+    返回 (deepen|pivot, 理由)。供 follow-up prompt 使用。
+    """
+    if not memory.rounds:
+        return "deepen", "尚无历史，可在 baseline 上首次改码"
+
+    cur = memory.rounds[-1]
+    direction = cur.direction_slug
+
+    for d in memory.abandoned_directions:
+        if d.direction == direction:
+            return "pivot", f"方向「{direction}」已在 abandoned：{d.reason}"
+
+    if len(memory.rounds) >= 2:
+        prev = memory.rounds[-2]
+        if prev.direction_slug == direction:
+            if cur.score <= prev.score + 0.5:
+                return (
+                    "pivot",
+                    f"同一方向「{direction}」连续两轮 score 未明显提升（{prev.score:.1f}→{cur.score:.1f}）",
+                )
+
+    for d in memory.promising_directions:
+        if d.direction == direction:
+            return "deepen", f"方向「{direction}」在 promising：{d.reason}"
+
+    if "drawdown_down_vs_prev" in (cur.auto_tags or []) or "return_up_vs_prev" in (
+        cur.auto_tags or []
+    ):
+        return "deepen", f"上一轮相对改善：{_effect_summary(cur)}"
+
+    if "return_down_vs_prev" in (cur.auto_tags or []):
+        return "pivot", "上一轮收益相对下降，建议换方向小步试错"
+
+    best = best_round(memory)
+    if best and best.loop_round == cur.loop_round:
+        return "deepen", "当前为会话最优 score，适合沿此文件小步微调"
+
+    return "pivot", "未识别到明确改善信号，建议换新方向（勿回到 abandoned）"
+
+
+def render_session_experiment_summary(memory: ResearchMemory) -> str:
+    """
+    3.7：同一会话内传给 Agent 的**实验总结**（方向 + 效果），替代冗长全文复述。
+    """
+    best = best_round(memory)
+    cur = memory.rounds[-1] if memory.rounds else None
+    action, action_reason = suggest_next_action(memory)
+
+    lines = [
+        "## 会话实验总结（脚本生成 · 请以本节为决策主依据）",
+        f"- **研究目标**：{memory.goal_text}",
+        f"- **Baseline 文件**：`{Path(memory.baseline_strategy).name}`（无 pivot 指令时不要整体回退到 baseline 另开大路）",
+    ]
+    if best:
         lines.append(
-            f"- 轮{r.loop_round + 1} `{r.strategy_name}` 方向=`{r.direction_slug}` "
-            f"策略收益≈{r.metrics.get('strategy_return_pct')}% "
-            f"策略年化≈{r.metrics.get('strategy_annual_return_pct')}% "
-            f"回撤≈{r.metrics.get('max_drawdown_pct')}% "
-            f"score={r.score:.2f} tags={','.join(r.auto_tags)}"
+            f"- **当前会话最优**：轮{best.loop_round + 1} `{best.strategy_name}` "
+            f"方向={best.direction_slug} score={best.score:.2f} "
+            f"({_metrics_line({**best.metrics, '_score': best.score})})"
+        )
+    lines.append(f"- **脚本建议下一步**：**{action.upper()}** — {action_reason}")
+    lines.append("")
+    lines.append("### 已尝试方向与效果（按轮）")
+    if not memory.rounds:
+        lines.append("（尚无回测）")
+    for r in memory.rounds:
+        mark = " ← 刚回测" if cur and r.loop_round == cur.loop_round else ""
+        lines.append(
+            f"- 轮{r.loop_round + 1} **{r.direction_slug}** | {_effect_summary(r)} | "
+            f"{_metrics_line({**r.metrics, '_score': r.score})}{mark}"
         )
         if r.agent_insight:
-            lines.append(f"  - Agent 备注：{r.agent_insight}")
+            lines.append(f"  - 备注：{r.agent_insight}")
 
     if memory.promising_directions:
-        lines.append("\n### 值得深挖的方向（promising）")
-        for d in memory.promising_directions[-8:]:
-            lines.append(f"- `{d.direction}`（{d.source}）：{d.reason}")
+        lines.append("\n### Promising（可深挖）")
+        seen: set[str] = set()
+        for d in reversed(memory.promising_directions):
+            if d.direction in seen:
+                continue
+            seen.add(d.direction)
+            lines.append(f"- **{d.direction}**：{d.reason}")
+            if len(seen) >= 5:
+                break
 
     if memory.abandoned_directions:
-        lines.append("\n### 建议避免/降权的方向（abandoned）")
-        for d in memory.abandoned_directions[-8:]:
-            lines.append(f"- `{d.direction}`（{d.source}）：{d.reason}")
+        lines.append("\n### Abandoned（勿再主攻）")
+        seen_ab: set[str] = set()
+        for d in reversed(memory.abandoned_directions):
+            if d.direction in seen_ab:
+                continue
+            seen_ab.add(d.direction)
+            lines.append(f"- **{d.direction}**：{d.reason}")
+            if len(seen_ab) >= 5:
+                break
 
     if memory.agent_notes:
-        lines.append("\n### Agent 历史要点")
-        for n in memory.agent_notes[-6:]:
+        lines.append("\n### 要点摘录")
+        for n in memory.agent_notes[-4:]:
             lines.append(f"- {n}")
 
     lines.extend(
         [
             "",
-            "### 你的策略",
-            "1. 若 promising 方向存在且近期 metrics 有改善，请在**当前 strategy_current** 基础上小步深挖 1～2 轮。",
-            "2. 若同一方向连续 2 轮无明显靠近目标（score/收益/回撤），请换方向，并将旧方向标记为 abandoned。",
-            "3. 回复末尾可选：`RESEARCH_INSIGHT: 一句话`；可选：`MEMORY_UPDATE_JSON: {\"direction\":\"…\",\"verdict\":\"promising|abandoned\",\"reason\":\"…\"}`",
+            "### 改码规则",
+            "- **deepen**：在 **strategy_current**（刚回测的 py）上小步修改，文件名体现同一方向细化。",
+            "- **pivot**：换新的方向 slug，仍基于 strategy_current 或最优轮代码，但逻辑假设需变化；abandoned 方向禁止再试。",
+            "- 完整记录见 `research_memory.json`，无需重读全部历史策略文件。",
         ]
     )
     return "\n".join(lines)
+
+
+def render_memory_for_prompt(memory: ResearchMemory) -> str:
+    """兼容旧调用；与 render_session_experiment_summary 相同。"""
+    return render_session_experiment_summary(memory)
+
+
+AGENT_TURN_FOOTER = """
+## 回复末尾（必须）
+ROUND_DECISION: deepen 或 pivot
+NEW_STRATEGY_FILE: strategies/你的文件名.py
+
+可选：
+RESEARCH_INSIGHT: 一句话
+MEMORY_UPDATE_JSON: {"direction":"方向slug","verdict":"promising|abandoned","reason":"..."}
+""".strip()

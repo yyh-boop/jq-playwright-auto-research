@@ -12,7 +12,13 @@ from typing import Any
 
 from autoresearch.cursor_client import run_local_agent_prompt
 from autoresearch.loop_agent_session import LoopAgentSession
-from autoresearch.research_memory import ResearchMemory, ingest_agent_response, render_memory_for_prompt
+from autoresearch.research_memory import (
+    AGENT_TURN_FOOTER,
+    ResearchMemory,
+    ingest_agent_response,
+    render_session_experiment_summary,
+    suggest_next_action,
+)
 from autoresearch.research_config import AgentResearchConfig
 from autoresearch.research_log import append_research_run
 from autoresearch.research_paths import BASE_DIR, STRATEGIES_DIR
@@ -66,7 +72,7 @@ def build_agent_prompt_from_payload(payload: dict[str, Any]) -> str:
     if paths.get("research_runs_jsonl"):
         lines.append(f"- 可选实验日志: {paths.get('research_runs_jsonl')}")
     if paths.get("research_memory"):
-        lines.append(f"- **会话记忆（必读）**: {paths.get('research_memory')}")
+        lines.append(f"- 完整记忆（可选，决策以下方「会话实验总结」为准）: {paths.get('research_memory')}")
     arts = paths.get("artifacts") or {}
     if any(arts.values()):
         lines.append("回测产物：")
@@ -85,10 +91,10 @@ def build_agent_prompt_from_payload(payload: dict[str, Any]) -> str:
             "",
             "## 执行",
             "在 strategies/ 下**新建**一份改进版 .py（勿改 *_original.py）。",
-            "写完后在回复**最后一行**严格输出：",
-            "NEW_STRATEGY_FILE: strategies/你的文件名.py",
-            "",
+            "以 **strategy_current** 为改码起点（若为空则读 manifest 中的策略路径）。",
             "并简要说明改动方向与关键逻辑变更。",
+            "",
+            AGENT_TURN_FOOTER,
         ]
     )
     return "\n".join(lines)
@@ -97,25 +103,27 @@ def build_agent_prompt_from_payload(payload: dict[str, Any]) -> str:
 def build_followup_prompt(payload: dict[str, Any], memory: ResearchMemory) -> str:
     paths = payload.get("paths_to_read") or {}
     ms = payload.get("metrics_summary") or {}
+    action, action_reason = suggest_next_action(memory)
     lines = [
-        "## 新一轮回测已完成（同一会话 follow-up）",
+        "## 新一轮回测已完成（3.7 · 总结驱动 follow-up）",
         "",
-        render_memory_for_prompt(memory),
+        render_session_experiment_summary(memory),
         "",
         "---",
-        "请阅读本轮材料并**在 strategy_current 基础上**出下一版：",
-        f"- manifest: {paths.get('run_manifest')}",
-        f"- 当前策略: {paths.get('strategy_current')}",
-        f"- 会话记忆文件: {paths.get('research_memory')}",
+        "## 本轮必读（勿重读 baseline / 全部历史 py）",
+        f"- run_manifest: {paths.get('run_manifest')}",
+        f"- **strategy_current（改码起点）**: {paths.get('strategy_current')}",
         "",
-        f"本轮指标摘要: strategy_return_pct={ms.get('strategy_return_pct')} "
-        f"strategy_annual_return_pct={ms.get('strategy_annual_return_pct')} "
-        f"max_drawdown_pct={ms.get('max_drawdown_pct')} passed={ms.get('passed')} gaps={ms.get('gaps')}",
+        f"**刚回测指标**: 策略收益={ms.get('strategy_return_pct')}% "
+        f"策略年化={ms.get('strategy_annual_return_pct')}% "
+        f"最大回撤={ms.get('max_drawdown_pct')}% passed={ms.get('passed')} gaps={ms.get('gaps')}",
+        "",
+        f"脚本建议你先 **{action.upper()}**（{action_reason}）；若你判断相反，请在 ROUND_DECISION 中说明理由。",
         "",
         "## 执行",
-        "在 strategies/ 下**新建**改进版 .py；最后一行严格输出：",
-        "NEW_STRATEGY_FILE: strategies/你的文件名.py",
-        "可选：RESEARCH_INSIGHT: … ； MEMORY_UPDATE_JSON: {\"direction\":\"…\",\"verdict\":\"promising|abandoned\",\"reason\":\"…\"}",
+        "在 strategies/ 下**新建**改进版 .py。",
+        "",
+        AGENT_TURN_FOOTER,
     ]
     return "\n".join(lines)
 
@@ -268,7 +276,7 @@ def run_research_agent_turn(
 
     if agent_turn == 0:
         base = build_agent_prompt_from_payload(payload)
-        prompt = base + "\n\n" + render_memory_for_prompt(memory)
+        prompt = base + "\n\n" + render_session_experiment_summary(memory)
     else:
         prompt = build_followup_prompt(payload, memory)
 
